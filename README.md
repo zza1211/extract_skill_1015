@@ -2,6 +2,8 @@
 
 初版由 OpenCode 主 agent 判断设备、条款边界、general/separate 关联和采购数量。Python 程序负责原文读取、定位映射、结构校验和保存；不调用外部抽取模型。
 
+首次理解经验机制，先看 [经验记忆技术方案与完整数据流](docs/memory-architecture.md)：涵盖存储形式、数据库结构、抽取与演进两条流程、回归门槛及当前限制。具体操作命令见 [经验维护说明](.opencode/skills/term-extract/references/experience.md)。
+
 ## 启动
 
 需要 Python 3.10+ 和支持项目 skills、custom tools 的 OpenCode。工具依赖版本见 `.opencode/package.json`。

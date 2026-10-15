@@ -13,7 +13,7 @@ export function projectRoot(directory: string): string {
   while (true) {
     if (existsSync(path.join(current, skillRelative, "SKILL.md"))) return current;
     const parent = path.dirname(current);
-    if (parent === current) throw new Error("找不到 term-extract skill，请从 skill-poc 目录启动 OpenCode。");
+    if (parent === current) throw new Error("找不到 term-extract skill，请从包含 .opencode/skills/term-extract 的项目根目录启动 OpenCode。");
     current = parent;
   }
 }

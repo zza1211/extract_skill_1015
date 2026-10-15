@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+from memory_store import run_memory_record
+
 
 def load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
@@ -97,6 +99,9 @@ def main() -> int:
             raise ValueError(validation_process.stderr.strip() or "结果校验没有返回报告")
         validation = json.loads(validation_process.stdout)
         coverage = coverage_report(index_path, Path(args.receipts))
+        if not index_path.with_name("memory_snapshot.json").is_file():
+            raise ValueError("缺少本任务经验快照，请重新注册文档；空经验库也需要固定空快照。")
+        memory = run_memory_record(index_path)
         errors = []
         if validation_process.returncode:
             errors.append("草稿未通过结构或证据格式校验，请先修订")
@@ -122,17 +127,23 @@ def main() -> int:
             "status": "demo_submitted" if demo else "submitted",
             "production_submittable": not demo,
             "model_id": args.model_id,
-            "skill_version": "0.1.2",
+            "skill_version": "0.2.0",
             "skill_sha256": hashlib.sha256(skill_path.read_bytes()).hexdigest(),
             "reference_sha256": reference_hashes,
             "source_path": index.get("source_path"),
             "source_sha256": index.get("source_sha256"),
             "coverage": coverage,
             "validation": validation,
+            "memory": memory,
             "semantic_validation": "由主 agent 核验；程序没有验证选型参数完整性、漏产品或数量语义。",
         }
-        for file, content in ((result_path, result), (evidence_path, evidence), (record_path, record)):
-            file.write_text(json.dumps(content, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        result_text = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+        evidence_text = json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"
+        record["result_sha256"] = hashlib.sha256(result_text.encode("utf-8")).hexdigest()
+        record["evidence_sha256"] = hashlib.sha256(evidence_text.encode("utf-8")).hexdigest()
+        result_path.write_text(result_text, encoding="utf-8", newline="\n")
+        evidence_path.write_text(evidence_text, encoding="utf-8", newline="\n")
+        record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
         print(json.dumps({"committed": True, "status": record["status"], "result_path": str(result_path), "evidence_path": str(evidence_path), "run_path": str(record_path), "production_submittable": not demo, "semantic_validation": record["semantic_validation"]}, ensure_ascii=False))
         return 0
     except (OSError, ValueError, TypeError, KeyError) as error:

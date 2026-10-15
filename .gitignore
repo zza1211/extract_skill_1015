@@ -2,6 +2,7 @@
 /structured_json/
 /example/
 /reports/
+/.term-memory/
 __pycache__/
 *.pyc
 node_modules/

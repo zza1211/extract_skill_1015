@@ -8,7 +8,7 @@
 
 如果已经在运行 OpenCode，新增或修改配置后退出并重新启动，以加载本项目配置。
 
-当前版本为 0.1.2：支持同一 `text` 字符串或表格单元格中的多个真实 `<Cxx>` 标签，原文件无需改写。模型读取时同一段落/单元格只标一次位置，全部原文和表格布局保留，完整定位偏移留在读取回执；七字段输出接口不变。版本 1 的旧索引需重新 `prepare`，已有版本 2 索引可用。
+当前版本为 0.2.0：保留同一段落/单元格中的多个真实 `<Cxx>` 标签和紧凑原文交付，七字段输出不变；新增独立的经验维护、离线回归和人工发布流程。旧任务需在新工作目录重新 `prepare`，以固定经验快照；文档索引仍为版本 2。
 
 克隆仓库后，从仓库根目录启动 OpenCode，避免父目录项目配置影响技能发现：
 
@@ -41,9 +41,11 @@ opencode
 - `.opencode/skills/term-extract/SKILL.md`：中文入口与执行方法。
 - `.opencode/skills/term-extract/references/`：业务口径、输出协议、输入与经验说明。
 - `.opencode/agents/term-extractor.md`：主 agent 的职责与工具范围。
+- `.opencode/agents/term-memory-curator.md`：经验候选整理与回归 agent，无发布权限。
 - `.opencode/tools/`：OpenCode 文档与结果工具。
 - `.opencode/skills/term-extract/scripts/`：无模型调用的 Python 辅助程序。
 - `runs/`：每次运行的索引、读取回执、草稿、校验报告和最终结果；不提交版本库。
+- `.term-memory/`：私有 SQLite 经验、审核及评测记录，Git 忽略；可外置到 `TERM_EXTRACT_MEMORY_DIR`。
 
 配置关闭自动会话压缩，以免原文变成摘要。关闭压缩不会扩大模型窗口；如果总上下文超限，任务应报告未完成。每篇标书开新会话。读取回执只证明原文已交付，不证明主模型正确理解。项目显式设置工具输出阈值，文档工具再控制分页大小，避免原文被 OpenCode 截断。
 
@@ -69,6 +71,7 @@ npm ci --prefix .opencode
 python -X utf8 -m unittest discover -s .opencode/skills/term-extract/scripts -p 'test_*.py'
 node tests/tool_smoke.mjs
 node tests/checkpoint_smoke.mjs
+node tests/memory_tools_smoke.mjs
 ```
 
 真实文件检查需要另行提供带标签的 JSON 目录，不会调用模型：
@@ -91,7 +94,15 @@ node tests/structured_json_smoke.mjs 'D:\你的目录\structured_json'
 
 同一采购对象的 separate 片段不能仅因局部没有数量就填写“未提及”，应核对关联条款与采购清单；校验器以 `SEPARATE_QUANTITY_MISSING_REVIEW` 提示可疑缺失，不自动复制数量。
 
-每次提交在 `run.json` 记录模型标识、输入哈希、技能版本及业务口径/经验说明的文件哈希。仓库不附带案例数据；`experience.md` 仅定义经验维护约定，具体案例和运行记录保存在仓库之外。
+每次提交在 `run.json` 记录模型标识、输入与结果哈希、技能/规则哈希、经验快照和实际交付的经验修订。仓库不附带案例或记忆数据库。
+
+## 经验演进
+
+流程为：人工导入已确认纠错 → `term-memory-curator` 整理候选 → 对给定 baseline/candidate 输出运行回归 → 维护者通过 CLI 审核发布 → 后续抽取按需召回。
+
+候选不参与日常抽取，agent 不能批准自身经验。发布需修复目标问题、没有已有断言退化，并通过独立反例；报告绑定经验修订和评测文件哈希。评测工具不自动启动模型，也不能证明改善必然由经验造成。日常抽取无需等待人工审批。
+
+每篇任务注册时冻结已发布集合，召回默认最多三条、约 6 KiB。检索在本地执行，不调用辅助模型，但仍占用主 agent 的工具交互轮次和上下文。撤回影响之后注册的任务；已有任务保留原快照。操作命令、数据格式和权限边界见 [经验记忆说明](.opencode/skills/term-extract/references/experience.md)及[回归清单](.opencode/skills/term-extract/references/memory-evaluation.md)。
 
 使用人工确认文档比较漏产品、关键参数覆盖、其他设备参数混入、关联、数量以及累计费用和耗时。分类仅参考。纠错保留原预测、正确结果和原因；在独立文档回归后发布新的经验或口径版本，避免仅在参与改进的文档上报成绩。
 

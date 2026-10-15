@@ -1,4 +1,5 @@
 import { tool } from "@opencode-ai/plugin";
+import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { digest, output, projectRoot, python, recordRead, resolveFile } from "../skills/term-extract/scripts/opencode_bridge.ts";
@@ -38,7 +39,7 @@ async function hasCandidateCheckpoint(indexPath: string): Promise<boolean> {
 export const prepare = tool({
   description: "注册标书 JSON；允许一个 text 或表格单元格包含多个 Cxx，保留每个标签的位置、表格行列和原文，建立可分页读取的索引。不做语义抽取。",
   args: {
-    input_path: tool.schema.string().describe("原始 JSON 文件路径，相对 skill-poc 或绝对路径"),
+    input_path: tool.schema.string().describe("原始 JSON 文件路径，相对项目根目录或绝对路径"),
     out_dir: tool.schema.string().optional().describe("本次独立工作目录；省略时自动创建 runs 下的新目录"),
     demo_tags: tool.schema.boolean().default(false).describe("仅显式演示时为缺标签样例生成模拟标签，结果标记为演示"),
   },
@@ -46,12 +47,20 @@ export const prepare = tool({
     const root = projectRoot(context.directory);
     const demoTags = args.demo_tags ?? false;
     const directory = resolveFile(root, args.out_dir || path.join("runs", new Date().toISOString().replace(/[:.]/g, "-") + "-" + Math.random().toString(16).slice(2, 8)));
+    if (existsSync(path.join(directory, "memory_snapshot.json"))) {
+      throw new Error("此任务目录已固定经验快照。继续任务请使用现有 index；重新抽取或切换经验版本请指定新的 out_dir，避免混用历史回执。");
+    }
     const argv = ["prepare", "--input", resolveFile(root, args.input_path), "--out-dir", directory];
     if (demoTags) argv.push("--demo-tags");
     const result = await python(root, "document_io.py", argv);
     // 每次 prepare 开始新的读取记录，不沿用上一轮会话的覆盖。
     await writeFile(path.join(path.dirname(result.index_path), "read_receipts.jsonl"), "", "utf8");
-    return output({ index_path: result.index_path, manifest_path: result.manifest_path, demo: result.demo, unit_count: result.unit_count, tag_count: result.tag_count, next_action: "使用 term_document_read 连续读取；原始 Cxx 保持不变。" });
+    const memory = await python(root, "memory_store.py", ["--project-root", root, "create-snapshot", "--index", result.index_path]);
+    if (memory.ok === false || memory.error || !memory.snapshot_sha256) throw new Error(memory.error || "无法固定本任务的经验快照。");
+    return output({ index_path: result.index_path, manifest_path: result.manifest_path, demo: result.demo, unit_count: result.unit_count, tag_count: result.tag_count,
+      memory_snapshot: { snapshot_path: memory.snapshot_path, snapshot_sha256: memory.snapshot_sha256, release_sha256: memory.release_sha256,
+        memory_count: memory.memory_count ?? memory.memories?.length ?? 0 },
+      next_action: "使用 term_document_read 连续读取；原始 Cxx 保持不变。形成候选后，只针对具体疑点调用 term_memory_recall。" });
   },
 });
 

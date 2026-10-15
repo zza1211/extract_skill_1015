@@ -10,6 +10,7 @@ import * as results from "../.opencode/tools/term_result.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "term-extract-tools-"));
+process.env.TERM_EXTRACT_MEMORY_DIR = path.join(temporary, "private-memory");
 const inputPath = path.join(temporary, "input.json");
 await writeFile(inputPath, JSON.stringify([
   { text: "<C100> Core Switch\n<C101>固定配置" },
@@ -38,7 +39,9 @@ const draft = [{ id: 0, 条款标题: "Core Switch", 条款分类: "normal", 相
 const evidence = { clauses: [{ id: 0, quantity_source_tags: ["<C6>"], related_source_tags: [], notes: "仅用于检查数量来源可在参数区段之外。" }], unresolved: [] };
 const checked = JSON.parse(await results.validate.execute({ index_path: prepared.index_path, result_json: JSON.stringify(draft), evidence_json: JSON.stringify(evidence), allow_demo: false }, context));
 assert.equal(checked.ok, true);
-const commitArgs = { index_path: prepared.index_path, result_path: checked.result_path, evidence_path: checked.evidence_path, model_id: "协议测试，未调用模型", allow_demo: false };
+const commitArgs = { index_path: prepared.index_path, result_path: checked.result_path, evidence_path: checked.evidence_path,
+  reflection_json: JSON.stringify({ insights: [], no_experience_reason: "本次只测试原文交付协议，没有新的业务经验。" }),
+  model_id: "协议测试，未调用模型", allow_demo: false };
 const premature = JSON.parse(await results.commit.execute(commitArgs, context));
 assert.equal(premature.committed, false, "未读原文时必须阻止提交");
 

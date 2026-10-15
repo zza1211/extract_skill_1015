@@ -44,6 +44,22 @@ class FakeStore:
         return {"evaluation_id": f"eval-{len(self.reports)}", "report_sha256": sha}
 
 
+class FakeLearning:
+    def __init__(self, sources):
+        self.sources = sources
+        self.calls = 0
+        self.drift = False
+
+    def evaluation_sources(self, root, payload):
+        self.calls += 1
+        result = copy.deepcopy(self.sources)
+        if self.drift and self.calls > 1:
+            result[-1]["confirmation"]["note"] += "（已变更）"
+            result[-1]["confirmation_sha256"] = hashlib.sha256(json.dumps(result[-1]["confirmation"],
+                sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        return result
+
+
 class MemoryEvaluationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -57,6 +73,7 @@ class MemoryEvaluationTests(unittest.TestCase):
         fix_index = json.loads((self.root / self.cases[0]["index_path"]).read_text(encoding="utf-8"))
         self.store = FakeStore({"correction_id": "corr-dev", "source_sha256": fix_index["source_sha256"],
                                 "family_id": "dev-a", "input_path": fix_index["source_path"]})
+        self.learning = None
         self.write_manifest()
 
     def tearDown(self):
@@ -90,7 +107,39 @@ class MemoryEvaluationTests(unittest.TestCase):
 
     def run_evaluation(self):
         self.write_manifest()
-        return evaluation.evaluate_manifest(self.root, "mem-test", 1, self.manifest_path, store=self.store)
+        return evaluation.evaluate_manifest(self.root, "mem-test", 1, self.manifest_path,
+                                            store=self.store, learning=self.learning)
+
+    def configure_success(self, mixed=False):
+        if mixed:
+            case = self.make_case("success", "dev-success", "success", "development")
+            self.cases.append(case)
+            legacy = self.store.get_correction(self.root, "corr-dev")
+            sources = [{**legacy, "source_id": "corr-dev", "correction_id": "corr-dev", "kind": "correction"}]
+        else:
+            case = self.cases[0]
+            case["role"] = "success"
+            self.write(self.root / case["baseline_result_path"], [record()])
+            self.store.candidate["payload"]["correction_ids"] = []
+            sources = []
+        index = json.loads((self.root / case["index_path"]).read_text(encoding="utf-8"))
+        result_path = self.root / "immutable-success.json"
+        self.write(result_path, [record()])
+        confirmation = {"confirmed_by": "人工验收", "family_id": case["family_id"], "note": "该次抽取正确且可复用"}
+        confirmation_path = self.root / "immutable-confirmation.json"
+        self.write(confirmation_path, confirmation)
+        sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+        confirmation_sha = hashlib.sha256(json.dumps(confirmation, sort_keys=True, ensure_ascii=False,
+                                                      separators=(",", ":")).encode()).hexdigest()
+        source = {"source_id": "source-success", "kind": "success", "confirmed": True, "family_id": case["family_id"],
+                  "source_sha256": index["source_sha256"], "input_path": index["source_path"],
+                  "index_path": str(self.root / case["index_path"]), "result_path": str(result_path),
+                  "result_sha256": sha(result_path), "confirmation": confirmation,
+                  "confirmation_sha256": confirmation_sha,
+                  "artifacts": [{"path": str(path), "sha256": sha(path)} for path in (result_path, confirmation_path)]}
+        self.store.candidate["payload"]["source_ids"] = [source["source_id"]]
+        self.learning = FakeLearning(sources + [source])
+        return source, case
 
     def candidate_output(self, case_number, records):
         self.write(self.root / self.cases[case_number]["candidate_result_path"], records)
@@ -98,8 +147,9 @@ class MemoryEvaluationTests(unittest.TestCase):
     def test_passes_key_parameter_assertions_with_legal_redundancy(self):
         report = self.run_evaluation()
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(report["summary"], {"fix_improvements": 1, "regressions": 0,
+        self.assertEqual(report["summary"], {"fix_improvements": 1, "success_cases": 0, "regressions": 0,
                          "independent_regression_cases": 2, "counterexample_cases": 1, "unfixed_target_cases": 0})
+        self.assertEqual(report["evaluation_mode"], "correction")
         self.assertEqual(len(self.store.reports), 1)
         self.assertNotIn("evaluation_id", self.store.reports[0])
         self.assertIn("不证明", report["notice"])
@@ -297,6 +347,154 @@ class MemoryEvaluationTests(unittest.TestCase):
         with mock.patch.object(evaluation, "MAX_REPORT_BYTES", 100):
             with self.assertRaisesRegex(evaluation.EvaluationError, "未注册"):
                 self.run_evaluation()
+
+
+    def test_confirmed_success_passes_without_fake_fix_improvement(self):
+        source, _ = self.configure_success()
+        report = self.run_evaluation()
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["evaluation_mode"], "success")
+        self.assertEqual(report["summary"]["fix_improvements"], 0)
+        self.assertEqual(report["summary"]["success_cases"], 1)
+        self.assertEqual(report["summary"]["unfixed_target_cases"], 0)
+        self.assertEqual(report["source_confirmations"], [{"source_id": "source-success",
+                         "confirmation_sha256": source["confirmation_sha256"]}])
+        self.assertEqual(report["cases"][0]["success_source_id"], source["source_id"])
+        self.assertEqual(report["cases"][0]["success_result_sha256"], source["result_sha256"])
+        paths = {item["path"] for item in report["artifacts"]}
+        self.assertTrue(all(item["path"] in paths for item in source["artifacts"]))
+        self.assertIn("不证明性能收益", report["notice"])
+
+    def test_unconfirmed_or_incomplete_success_source_is_rejected(self):
+        self.configure_success()
+        original = copy.deepcopy(self.learning.sources)
+        for field in ("confirmed", "confirmation", "confirmation_sha256", "artifacts"):
+            with self.subTest(field=field):
+                self.learning.sources = copy.deepcopy(original)
+                self.learning.sources[-1].pop(field)
+                with self.assertRaises(evaluation.EvaluationError):
+                    self.run_evaluation()
+        self.assertEqual(self.store.reports, [])
+
+    def test_success_still_requires_independent_counterexample(self):
+        self.configure_success()
+        self.cases = self.cases[:2]
+        report = self.run_evaluation()
+        self.assertEqual(report["summary"]["success_cases"], 1)
+        self.assertEqual(report["summary"]["counterexample_cases"], 0)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("NO_PASSING_COUNTEREXAMPLE", {item["code"] for item in report["gate_errors"]})
+
+    def test_success_development_family_and_source_cannot_be_regression(self):
+        self.configure_success()
+        for mutation in ("family", "source"):
+            with self.subTest(mutation=mutation):
+                original = copy.deepcopy(self.cases[1])
+                if mutation == "family":
+                    self.cases[1]["family_id"] = self.cases[0]["family_id"]
+                else:
+                    self.cases[1]["index_path"] = self.cases[0]["index_path"]
+                with self.assertRaises(evaluation.EvaluationError):
+                    self.run_evaluation()
+                self.cases[1] = original
+
+    def test_success_candidate_regression_fails_and_baseline_must_already_pass(self):
+        self.configure_success()
+        self.candidate_output(0, [record(end="<C90>")])
+        report = self.run_evaluation()
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["summary"]["success_cases"], 0)
+        self.assertEqual(report["summary"]["regressions"], 1)
+        self.assertEqual(report["summary"]["unfixed_target_cases"], 1)
+        self.candidate_output(0, [record()])
+        self.write(self.root / self.cases[0]["baseline_result_path"], [record(end="<C90>")])
+        # A source can be confirmed while the new assertions reveal an omitted key requirement.
+        source = self.learning.sources[-1]
+        self.write(Path(source["result_path"]), [record(end="<C90>")])
+        source["result_sha256"] = hashlib.sha256(Path(source["result_path"]).read_bytes()).hexdigest()
+        source["artifacts"][0]["sha256"] = source["result_sha256"]
+        report = self.run_evaluation()
+        self.assertEqual(report["summary"]["unfixed_target_cases"], 0)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("SUCCESS_BASELINE_FAILED", {item["code"] for item in report["gate_errors"]})
+
+    def test_success_role_must_match_success_source_and_development_split(self):
+        self.configure_success()
+        self.cases[0]["split"] = "regression"
+        with self.assertRaises(evaluation.EvaluationError):
+            self.run_evaluation()
+        self.cases[0]["split"] = "development"
+        self.cases[0]["family_id"] = "other-family"
+        with self.assertRaisesRegex(evaluation.EvaluationError, "成功来源"):
+            self.run_evaluation()
+
+    def test_mixed_sources_keep_correction_gate_and_isolate_success_sources(self):
+        self.configure_success(mixed=True)
+        report = self.run_evaluation()
+        self.assertEqual(report["evaluation_mode"], "correction")
+        self.assertEqual(report["summary"]["fix_improvements"], 1)
+        self.assertEqual(report["summary"]["success_cases"], 1)
+        self.assertEqual(report["status"], "passed")
+        self.write(self.root / self.cases[0]["baseline_result_path"], [record()])
+        report = self.run_evaluation()
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("NO_FIX_IMPROVEMENT", {item["code"] for item in report["gate_errors"]})
+
+    def test_success_confirmation_and_immutable_result_cannot_drift(self):
+        source, _ = self.configure_success()
+        self.learning.drift = True
+        with self.assertRaisesRegex(evaluation.EvaluationError, "来源或人工确认发生变化"):
+            self.run_evaluation()
+        self.assertEqual(self.store.reports, [])
+        self.learning.drift = False
+        self.write(Path(source["result_path"]), [record(quantity="3")])
+        with self.assertRaisesRegex(evaluation.EvaluationError, "不可变工件已变化"):
+            self.run_evaluation()
+
+    def test_success_baseline_is_bound_to_confirmed_result_not_just_passing_assertions(self):
+        self.configure_success()
+        # Harmless extra tags still pass the assertions, but cannot impersonate the saved baseline.
+        self.write(self.root / self.cases[0]["baseline_result_path"], [record(end="<C50>")])
+        with self.assertRaisesRegex(evaluation.EvaluationError, "已确认的结果快照一致"):
+            self.run_evaluation()
+        self.assertEqual(self.store.reports, [])
+        # File formatting is not part of the seven-field output identity.
+        path = self.root / self.cases[0]["baseline_result_path"]
+        path.write_text(json.dumps([record()], ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.run_evaluation()["status"], "passed")
+
+    def test_real_confirmed_learning_source_evaluates_and_publishes_without_model(self):
+        import memory_learning
+        import memory_store
+
+        case = self.cases[0]
+        case["role"] = "success"
+        self.write(self.root / case["baseline_result_path"], [record()])
+        index_path = self.root / case["index_path"]
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        fingerprint = hashlib.sha256(index_path.read_bytes()).hexdigest()
+        evidence_path, run_path = self.root / "evidence.json", self.root / "run.json"
+        self.write(evidence_path, {"clauses": [{"id": 0, "notes": "合成来源核验",
+                   "quantity_source_tags": ["<C90>"], "related_source_tags": []}], "unresolved": []})
+        self.write(run_path, {"status": "submitted", "production_submittable": True,
+                   "source_sha256": index["source_sha256"],
+                   "coverage": {"complete": True, "index_sha256": fingerprint}})
+        run = memory_learning.register_run(self.root, index_path,
+            self.root / case["baseline_result_path"], evidence_path, run_path)
+        payload = {"title": "合成成功经验", "issue_type": "boundary", "triggers": ["同一产品"],
+                   "applies_when": "同一采购对象的连续要求", "rule": "保留关键参数和完整产品边界",
+                   "exclusions": "独立采购的其他设备", "correction_ids": [], "source_ids": [run["run_id"]]}
+        candidate = memory_store.propose(self.root, payload)
+        self.write_manifest()
+        with self.assertRaisesRegex(memory_store.MemoryError, "未经人工确认"):
+            evaluation.evaluate_manifest(self.root, candidate["memory_id"], candidate["revision"], self.manifest_path)
+        memory_learning.confirm_run(self.root, run["run_id"], "合成人工", "dev-a", "已确认合成成功来源")
+        report = evaluation.evaluate_manifest(self.root, candidate["memory_id"], candidate["revision"], self.manifest_path)
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["evaluation_mode"], "success")
+        published = memory_store.publish(self.root, candidate["memory_id"], candidate["revision"],
+                                         report["evaluation_id"], "合成人工", "通过成功兼容回归")
+        self.assertEqual(published["state"], "published")
 
 
 if __name__ == "__main__":

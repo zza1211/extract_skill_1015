@@ -1,447 +1,309 @@
 # 经验记忆技术方案与完整数据流
 
-本文对应当前 **0.2.0** 实现，面向需要理解、维护或继续开发本项目的人。阅读代码和操作参数可分别参考文末索引及 [经验维护操作说明](../.opencode/skills/term-extract/references/experience.md)。
+本文对应 **0.3.0**，说明当前实际实现、数据流和人工边界。操作参数见 [经验维护说明](../.opencode/skills/term-extract/references/experience.md)，断言格式见 [回归清单](../.opencode/skills/term-extract/references/memory-evaluation.md)。文中编号和目录均为结构示意，仓库不附带案例、私有数据库或运行结果。
 
-先明确当前记忆的形式：**把人工纠错提炼成短小、带适用边界的规则，经过评测与发布后，按需放入后续抽取任务的模型上下文。** 模型参数不会因此更新。新会话能使用旧经验，是因为工具重新读取了持久化规则，而不是模型自动记住了上次聊天。
+当前机制是：主 agent 在正式提交时主动复盘，工具保存不可变运行、用户反馈和候选规则；人工确认来源，离线评测与人工发布后，后续新任务才按需召回规则。模型参数不更新，没有后台监听会话，也不另调模型分析聊天。新会话能用旧经验，是因为工具重新交付持久化规则。
 
-本文的 JSON 片段均为结构示意，编号、摘要及文字不是真实案例，也不表示已经发布了经验。源码仓库不附带案例、记忆数据库或运行结果。
+这套流程已有存储和门槛检查，尚无真实效果验证。结构通过、来源确认、离线断言通过与经验发布是不同结论，均不能单独证明全面业务正确或收益提升。
 
-建议先读第 1–2 节理解“记忆是什么”，再沿第 5 节看一次抽取、沿第 6 节看一次演进；第 7 节解释回归检查能证明什么，第 11 节列出尚未实现的部分。
-
-## 1. 先分清四类内容
-
-| 内容 | 举例说明 | 保存位置 | 日常抽取如何使用 |
-|---|---|---|---|
-| 固定业务规则 | normal/general/separate 的定义、数量取证原则 | `business-rules.md` 等技能文件 | 开始任务时读取 |
-| 人工纠错事实 | 哪份输入曾抽错、错误与正确输出、修改原因、确认人 | 私有 SQLite 的 `corrections` | 不会整批交给抽取 agent |
-| 可复用经验 | 在什么前提下应增加哪一步判断，哪些情况不能套用 | SQLite 的 `revisions`，由 `active` 选择发布版本 | 只从本任务快照按需召回 |
-| 单次任务记录 | 原文索引、候选草稿、读过哪些内容、最终结果 | `runs/任务目录/` | 用于当前任务与追溯，不自动变成全局经验 |
-
-其中，**纠错事实提供依据，可复用经验改变后续判断方式**。保存了一份正确输出，不等于系统已经学到了可迁移的经验；候选经验写入数据库，也不等于已经生效。
-
-例如，某次人工纠错发现“采购量被误读成端口数”，可复用的内容应是数量取证前提与核验动作。具体文档里的设备数量、设备名称和 C 标签仍属于该文档的事实，不能直接搬到另一份标书。
-
-## 2. 一条经验在数据库里长什么样
-
-一条修订由 `memory_id + revision` 唯一确定，规则正文为结构化 JSON：
-
-```json
-{
-  "memory_id": "mem_example",
-  "revision": 1,
-  "content_sha256": "规则正文的 SHA-256 摘要",
-  "payload": {
-    "title": "按采购对象核对独立清单中的数量",
-    "issue_type": "quantity",
-    "triggers": ["采购数量", "purchase quantity", "item number"],
-    "applies_when": "正文与清单能够通过明确采购编号确认是同一计量对象。",
-    "rule": "核对采购编号、单位和适用范围，再将清单数量作为证据；不要把端口数或容量作为采购量。",
-    "exclusions": "编号不能对应、清单是总计而正文是单站配置，或者两处计量对象不同的情况。",
-    "correction_ids": ["corr_example"]
-  }
-}
-```
-
-这段内容表达的是一个**有条件的核验建议**。程序会检查字段、长度和引用是否合法，但不会自动理解这些自然语言条件是否正确。
-
-从模型视角看，经验就是工具消息中的规则文本，会占用上下文。工程机制负责持久化、选择、版本控制、发布与撤回；自然语言规则的理解和应用仍由主 agent 完成。
-
-几个字段的作用不同：
-
-- `triggers` 用于便宜地找到可能相关的经验；不是自动触发后直接执行的条件表达式。
-- `applies_when`、`rule`、`exclusions` 共同交给主 agent，由它结合当前原文判断是否采用。
-- `correction_ids` 指向依据，方便维护者复核；召回时不会连带展开纠错的输入与错误/正确输出。
-- `issue_type` 是经验检索与维护分类，取值为 `missing_product`、`boundary`、`quantity`、`association`；不是最终结果里的产品分类。
-
-单条 payload 的规范 JSON 最多 4096 字节，避免规则越写越长，或者为了预算而只交付处理原则、丢掉适用边界。
-
-### 2.1 编号、修订和发布集合
-
-| 标识 | 含义 |
-|---|---|
-| `correction_id` | 一次已导入的人工纠错事实 |
-| `memory_id` | 同一条经验的稳定编号 |
-| `revision` | 这条经验的某个不可变修订，从 1 递增 |
-| `content_sha256` | 该修订 payload 的内容摘要 |
-| `evaluation_id` | 一份不可变离线评测报告 |
-| `release_sha256` | 当前发布集合的摘要：按编号排序后的 `[memory_id, revision, content_sha256]` 列表取哈希 |
-| `snapshot_sha256` | 一个任务的经验快照内容摘要，包含任务索引绑定信息 |
-
-`release_sha256` 不是递增版本号。同一发布集合可以得到相同摘要；每篇任务的快照还包含建立时间与索引摘要，身份与发布集合不同。
-
-## 3. 物理存储与数据边界
-
-默认目录如下。标有“私有”的内容均不进入 Git：
-
-```text
-项目根目录/
-├── README.md
-├── docs/memory-architecture.md              # 本文，供人阅读
-├── .opencode/
-│   ├── agents/
-│   │   ├── term-extractor.md                # 日常抽取
-│   │   └── term-memory-curator.md           # 经验维护
-│   ├── tools/term_memory.ts                 # OpenCode 记忆工具适配
-│   └── skills/term-extract/
-│       ├── references/                     # 固定业务与维护约定
-│       └── scripts/
-│           ├── memory_store.py             # 存储、发布、快照、召回
-│           └── memory_evaluate.py          # 离线断言评测
-├── .term-memory/                            # 私有，Git 忽略
-│   └── memory.sqlite3
-└── runs/任务目录/                           # 私有，Git 忽略
-    ├── index.json                          # 当前标书原文与定位索引
-    ├── memory_snapshot.json                # 注册时全部已发布经验
-    ├── memory_receipts.jsonl               # 此任务实际交付过的经验标识
-    ├── read_receipts.jsonl                 # 原文交付覆盖记录
-    ├── draft/
-    │   ├── candidates.json
-    │   ├── result.json
-    │   └── evidence.json
-    ├── validation.json
-    └── final/
-        ├── result.json
-        ├── evidence.json
-        └── run.json
-```
-
-可用 `TERM_EXTRACT_MEMORY_DIR` 把数据库放到项目之外。导入、维护、发布和启动 OpenCode 的进程必须使用相同设置，否则它们会操作不同的库。自定义目录若仍在 Git 工作区内，需要另加忽略规则。
-
-空库可以正常抽取。只读取空库不会创建数据库；首次导入或写入时才创建。SQLite 使用 WAL 模式，运行时也可能出现配套的 `-wal`、`-shm` 文件。
-
-### 3.1 SQLite 的六张表
-
-| 表 | 保存内容 | 更新方式 |
-|---|---|---|
-| `corrections` | `correction_id`、完整 `record_json`、记录摘要 | 追加，不覆盖 |
-| `revisions` | `memory_id`、`revision`、`payload_json`、内容摘要、建立时间 | 新修订追加 |
-| `evaluations` | 候选身份、完整 `report_json`、报告摘要 | 评测报告追加 |
-| `active` | 每条经验当前发布的修订和发布所用评测编号 | 发布时切换，撤回时删除指针 |
-| `used_evaluations` | 已被一次发布使用过的评测编号 | 追加，防止重复使用旧报告 |
-| `audit` | 发布/撤回事件、审核人、说明和相关摘要 | 事件追加 |
-
-除 `active` 外，内容表通过 SQLite 触发器限制 UPDATE/DELETE。发布不是把候选文件移动到另一个文件夹，而是在事务中更新 `active`。
-
-### 3.2 纠错记录到底复制了什么
-
-`corrections.record_json` **不只保存文件路径**，当前实现还保存了可解析的错误输出和正确输出：
-
-| 数据 | 当前保存方式 |
-|---|---|
-| 原始标书 JSON | 绝对路径与原文件 SHA-256；不将原文复制到纠错记录 |
-| 错误输出 | 路径、摘要，以及解析后的 `before_json`；解析失败时该字段为 null |
-| 人工正确输出 | 路径、摘要，以及解析后的 `after_json` |
-| 修改原因、确认人、文档家族 | 保存在纠错记录中 |
-
-导入器要求正确输出是 JSON 数组，这不等于程序证明了标签的业务正确性。错误/正确输出解析有大小限制；原始文件仍应保留，发布时会重新检查三个来源文件的摘要。
-
-`show-correction` 和 `term_memory_correction` 返回元数据与路径，主动去掉 `before_json/after_json`，避免默认把完整输出灌入模型。维护 agent 需要时再读取用户指定的文件。
-
-已经发布的经验在日常召回时不会重新读取这些外部纠错文件。外部文件丢失会影响后续核验与发布，不会自动撤销已经发布的规则。
-
-## 4. 总体上有两条流程
-
-日常抽取负责消费已发布经验；经验维护负责让新知识经过核验后进入发布集合。
+## 1. 从空库到第二篇标书
 
 ```mermaid
 flowchart TD
-    H["人工确认纠错"] --> C["SQLite：纠错事实"]
-    C --> M["维护 agent：整理条件、原则与反例"]
-    M --> V["SQLite：候选修订"]
-    V --> E["离线评测器"]
-    X["外部准备 baseline/candidate 输出与人工断言"] --> E
-    E --> R["SQLite：评测报告"]
-    R --> P["维护者审阅并执行发布 CLI"]
-    P --> A["SQLite：active 发布指针"]
-    A --> S["新抽取任务：冻结经验快照"]
-    S --> Q["按具体疑点召回少量规则"]
-    Q --> L["抽取 agent 结合当前原文判断"]
-    L --> O["结果、证据与追溯记录"]
-    O -. "人工发现问题后进入下一轮" .-> H
+    A["空经验库"] --> B["第一篇：注册空快照，读取原文并抽取"]
+    B --> C["主 agent 主动复盘，与结果一起 commit"]
+    C --> D["不可变 run + 来源 + 未验证候选"]
+    D --> E["人工 confirm-run：核验原结果正确"]
+    D --> F["用户反馈：保存原话与可选修正稿，指向旧 run"]
+    F --> F2["无稿时：形成稿后以同旧 run、同原话再次登记"]
+    F2 --> G["人工 confirm-feedback：确认新的带稿反馈"]
+    F -->|"首次已有完整稿"| G
+    F --> H["agent 据原文修正并新提交；旧 run 保留"]
+    E --> I["curator 按来源整理规则与边界"]
+    G --> I
+    I --> J["外部准备两组输出与人工关键参数断言"]
+    J --> K["离线评测：自动判断 success / correction 模式"]
+    K --> L["维护者审阅并执行 publish CLI"]
+    L --> M["第二篇新任务：固定新发布集合，按疑点召回"]
 ```
 
-图中的“外部准备两组输出”目前是明确的人工或外部运行器步骤。当前评测工具不会替你运行两组模型实验。
+第一篇不需要已有 badcase，也不需要先建案例库。有新观察就形成候选；没有就提交空 `insights` 并说明原因。候选不参与生产召回，所以保存第一篇不会立即改变第二篇。经验必须经历来源确认、评测和人工发布。
 
-## 5. 数据流 A：一篇标书如何使用记忆
+确认运行正确走 `confirm-run`；反馈通路保存的是 `correction` 来源，只有实际不同的完整修正稿才能 `confirm-feedback`。单纯肯定“这篇正确”不能作为纠错确认；curator 可将相关观察整理为引用该 run 的成功经验。
 
-### 5.1 注册：固定输入与经验集合
+## 2. 分清事实、候选和生效规则
 
-调用 `term_document_prepare` 后：
-
-1. 解析带真实 C 标签的 JSON，生成当前任务的 `index.json` 等原文资产。
-2. 建立新的原文读取记录。
-3. 从 SQLite 的 `active` 找到当前全部发布修订。
-4. 把这些修订的完整规则正文写入 `memory_snapshot.json`，绑定当前 index 的 SHA-256。
-5. 向模型只返回索引路径、数量、快照路径与摘要等元数据。
-
-**快照在磁盘上包含全部已发布规则，但模型此时没有收到这些规则全文。** 磁盘存储量与模型上下文量是两回事。
-
-快照结构示意：
-
-```json
-{
-  "schema_version": 1,
-  "created_at": "建立快照的时间",
-  "index_sha256": "当前原文索引摘要",
-  "release_sha256": "本次发布集合摘要",
-  "memories": [
-    {
-      "memory_id": "mem_example",
-      "revision": 1,
-      "content_sha256": "规则正文摘要",
-      "payload": { "说明": "这里实际保存第 2 节所示的完整规则字段" }
-    }
-  ],
-  "snapshot_sha256": "整个快照正文摘要"
-}
-```
-
-这只是省略字段后的阅读示意，不能拿来替换真实快照。快照不包含纠错的 before/after、完整评测工件或历史标书。
-
-### 5.2 读取与形成疑点
-
-主 agent 通过 `term_document_read` 完整读取当前标书，保存采购对象候选。记忆查询由 agent 围绕具体疑点发起，例如“同一设备的数量位于单独清单，名称存在差异”。
-
-原文仍然需要读取。经验检索不是用历史答案代替当前标书，也不能用命中片段代替全文覆盖。没有疑点无需强行调用记忆工具；没有相关经验时继续按固定口径判断。
-
-### 5.3 召回：从固定快照挑选相关规则
-
-调用 `term_memory_recall` 时读取的是本任务快照，不会再查询当前数据库的最新发布状态。
-
-```mermaid
-flowchart LR
-    Q["agent 给出疑点 query 和可选 issue_type"] --> F["读取并校验固定快照"]
-    F --> T["分词、类型过滤、相关性排序"]
-    T --> B["选 top K，再按字节预算装入完整规则"]
-    B --> J["TS 序列化与实际字节校验"]
-    J --> R["追加经验交付回执"]
-    R --> M["返回少量规则给主 agent"]
-    M --> D["主 agent 检查适用边界并回原文取证"]
-```
-
-当前检索是本地词语匹配，具体规则为：
-
-- 英文与数字转小写后分词；连字符、下划线可保留在词内。
-- 连续中文生成相邻双字的集合。
-- 可选 `issue_type` 先做精确过滤。
-- 设 query 词集为 Q，triggers 词集为 T，title + applies_when + rule 的词集为 B，则 `score = 3 × |Q∩T| + |Q∩B|`。
-- 分数大于 0 的条目可入选，按分数降序排列；同分按编号和修订稳定排序。
-
-不要求一定命中 triggers；正文词语重合也可能入选。`exclusions` 不参与排序，但会完整交付给主 agent。这个分数只是排序依据，不是置信度，也不会自动执行自然语言条件。
-
-工具默认最多三条、6144 字节，可调至最多五条、8192 字节。先取 top K，再按预算逐条放入；放不下就跳过整条，不截断规则，也不从 K 之外补位。`budget_omitted` 统计这批 top K 内因预算未交付的条目。因此“最多三条”可能实际返回一条、两条或零条。
-
-Python 诊断 CLI 的字节范围更宽，日常 OpenCode 工具使用上述较小上限。库变大时主要增加本地扫描与快照存储量，不会把所有规则直接加进提示上下文。
-
-### 5.4 经验通过什么方式影响模型
-
-工具返回的是第 2 节这种规则正文。主 agent 在同一抽取会话中阅读它，然后决定是否需要补读、修订边界、核对数量或调整关联。
-
-经验没有被编译成 Python 判断，也没有作为强制补丁自动改写七字段结果。自然语言适用条件仍由主 agent 判断，所以即使检索命中，模型仍可能不采用、误用或遗漏条件。
-
-检索本身不调用辅助模型或 embedding 服务，但工具交互通常会增加主 agent 的推理轮次和输入上下文；运营成本不是零。控制条目长度、召回条数和调用频率是目前的成本控制手段。
-
-### 5.5 交付回执与最终记录
-
-序列化与预算校验成功后，才写 `memory_receipts.jsonl`。每条回执保存时间、snapshot/release/index 摘要，以及：
-
-```json
-{
-  "delivered": [
-    { "memory_id": "mem_example", "revision": 1, "content_sha256": "规则正文摘要" }
-  ]
-}
-```
-
-实际回执还有 schema 和绑定字段，上面只展示交付清单。回执不保存 query、分数或规则全文，规则全文已经在快照里；空召回也可以记录空清单。
-
-最终提交时，程序重新检查快照、自身摘要、index 绑定及回执中的修订身份，把交付经验按编号聚合去重后写入 `run.json.memory`。最终 `result.json` 仍是原来的七字段数组。
-
-正式提交通路还要求结果结构检查通过、当前原文的读取回执覆盖完整、证据中的 `unresolved` 为空。记忆校验通过不能替代这些条件，原文读完也不能替代业务正确性核验。
-
-这份记录能回答“工具交付了哪版经验”，不能回答“模型一定采用了哪条经验、采用是否正确”。它也不是完整模型请求快照，不足以保证同一模型逐字复现原输出。
-
-## 6. 数据流 B：一次纠错如何成为后续记忆
-
-### 6.1 导入人工纠错
-
-维护者提供原始输入、错误输出、人工正确输出、修改原因、确认人和 `family_id`，通过 `import-correction` 导入。数据库分配 `correction_id`。
-
-`family_id` 用来把同一标书的译文、修订版和近重复模板放在同一家族，避免拿来源材料的另一份拷贝充作独立回归。程序能核对显式家族与相同输入摘要，不能自动认识所有近重复文档。
-
-### 6.2 整理候选经验
-
-在 `term-memory-curator` 中提供纠错编号。它可以通过工具读取纠错元数据，按需读取指定文件，归纳条件与反例，再调用 `term_memory_propose`。
-
-这一步的模型工作是**从个案归纳候选规则**。输出写入 `revisions`，没有修改 `active`，所以不会影响任何正常新任务。
-
-一条经验可以引用多条纠错，不要求“一份纠错对应一条规则”。提炼与启动维护任务都不是 SQLite 自动完成的；当前需要维护者提供纠错编号并调用维护 agent，已有经验的修改则沿同一 memory_id 创建新修订。
-
-人工已经明确给出的正确标签可直接作为来源，不必重复确认同一标签；但“这次怎么修”与“以后哪些情况都适用”是两个判断，后者仍需验证。
-
-### 6.3 准备两组输出与人工断言
-
-当前需要用户或外部实验流程准备：
-
-1. baseline：候选经验引入前的抽取输出。
-2. candidate：评测该候选经验时产生的抽取输出。
-3. manifest：哪些产品和参数必须保留、哪些参数不能混入、数量或条款分类应是什么。
-
-候选未发布时，生产召回工具不会读到它。要做候选实验，外部流程需在隔离评测上下文中明确提供候选规则，不能靠生产 `recall` 偷读候选，也不能为了试验先发布。
-
-**当前还没有自动生成这两组输出、冻结全部运行参数并证明候选注入来源的运行器。** 实验应隔离目录与会话、使用可比较配置，并另外保留来源。当前 `run.json` 也不会自动标记外部临时提示中的未发布规则。人工正确输出不能冒充 candidate 模型输出。
-
-### 6.4 离线比较与报告入库
-
-`term_memory_evaluate` 或 `memory_evaluate.py` 会：
-
-1. 读取指定候选修订及其全部来源纠错，记录当前发布集合摘要。
-2. 读取 manifest、索引及 baseline/candidate JSON。
-3. 校验结构、数据分组和人工断言，比较改善与退化。
-4. 再次核对输入工件未变化，将完整报告追加到 SQLite。
-5. `term_memory_evaluate` 给 agent 返回评测编号、摘要和门槛统计等；`memory_evaluate.py` CLI 则打印完整报告，入库报告也可通过 `show-evaluation` 查看。
-
-评测器没有调用抽取模型，也没有自动把候选规则注入一次新抽取。baseline/candidate 文件名只描述角色，不能证明输出如何产生。
-
-### 6.5 人工发布
-
-维护者审阅候选、报告、来源及适用边界后，通过 `publish` CLI 指定 memory_id、revision、evaluation_id、reviewer 和说明。
-
-发布事务会重新核对：
-
-- 经验身份、内容摘要与报告完全对应。
-- 当前发布集合与报告基线一致，报告未被之前的发布消耗。
-- 发布门槛通过，来源纠错非空且有确认记录。
-- 纠错原文件及报告引用的工件仍存在且摘要一致。
-
-通过后追加审核事件、记录已使用报告，并切换 `active`。下一篇新注册任务才能使用新版本。任意一项不满足就拒绝发布，而不是跳过校验。
-
-## 7. 回归到底在检查什么
-
-完整字段定义见 [回归清单](../.opencode/skills/term-extract/references/memory-evaluation.md)。程序比较的是**人工标出的关键标签条件**，不理解标签内部参数的业务含义。
-
-### 7.1 如何找到同一个采购对象
-
-`anchor_tag` 必须落在唯一一条 normal/separate 记录的自身区间内。零匹配视为漏对象，多匹配视为歧义。标题、产品分类和 `object_key` 不用于匹配；`object_key` 只是报告标识。
-
-找到主体后，参数覆盖范围为：
-
-1. 主体自身。
-2. 通过 separate 关联相连的 normal/separate 连通分量。
-3. 直接指向该分量成员的 general。
-
-不会沿 general 再扩散到它约束的另一设备。但程序也不能自动证明 separate 关联的业务身份正确，错误关联仍需靠禁止参数等断言识别。
-
-### 7.2 断言及其边界
-
-| 断言 | 实际检查 | 不会自动检查 |
+| 内容 | 保存与作用 | 能否直接影响下一篇 |
 |---|---|---|
-| `required_tags` | 有效参数范围覆盖这些标签 | 未标出的其他重要参数是否遗漏 |
-| `forbidden_tags` | 有效参数范围没有覆盖这些标签 | 未标出的污染，以及标签内部的细粒度混合 |
-| `quantity` | anchor 主体的数量字符串精确相等 | 数值等价、单位归一化、所有 separate 数量一致性 |
-| `clause_category` | anchor 主体的分类精确相等 | 全文所有 general/separate 语义都正确 |
+| 固定业务规则 | 技能文件，规定对象、边界、关联、数量等口径 | 开始任务时读取 |
+| 运行记录 | 输入/index 绑定、结果、证据、模型与技能信息、经验交付记录 | 不作为历史答案提供给 extractor |
+| 复盘 | 本次实际疑点、核验动作或自我修正，附原文标签 | 先形成未验证候选 |
+| 用户反馈 | 原话、旧 run 引用、可选 agent 修正稿与复盘 | 尚不是人工正确答案 |
+| 人工确认来源 | 已核验成功结果，或已核验反馈修正稿 | 可用于评测，不等于批准规则 |
+| 经验修订 | 有触发词、前提、动作、排除情况和来源的不可变规则 | 只有发布版能进入新任务快照 |
+| 评测报告 | 给定两组结果满足关键断言及门槛的记录 | 供人工发布判断 |
 
-区间按索引的原文 order 判断，不按 C 后面的数字排序。没有要求与正确输出的起止标签完全相等，因此允许未被列为禁止项的无害冗余。general 不作为 anchor 主体单独选择。
+复盘不能复述既有业务规则或已召回经验，也不应把本篇设备名称、数量、定位标签当成可迁移答案。简短 `observation` 记录实际发生的事实和结论，不保存内部思维链。
 
-两组结果都要先通过结构检查；任意结构 error 使总体报告失败。此处不要求 evidence sidecar，warnings 本身不阻断，因此报告通过不代表所有数量来源或关联语义已经确认。
+### 2.1 编号与规则正文
 
-### 7.3 五个硬门槛
-
-| 字段 | 单位与计算 | 要求 |
-|---|---|---|
-| `fix_improvements` | baseline 有断言失败、candidate 全断言通过的 fix 案例数 | 至少 1 |
-| `unfixed_target_cases` | candidate 仍有断言失败的 fix 案例数 | 0 |
-| `regressions` | baseline 已通过、candidate 变失败的断言数 | 0 |
-| `independent_regression_cases` | 独立于全部来源纠错、两组输出均全断言通过的非 fix 案例数 | 至少 1 |
-| `counterexample_cases` | 满足上述独立性、两组均通过，且有不适用说明和边界断言的反例数 | 至少 1 |
-
-同一合格反例可以同时满足后两项，所以最低可由“一个修复案例 + 一个独立反例”组成，不要求三种角色各一份。实际回归覆盖应随经验影响范围增加。
-
-“无退化”只针对清单中原来已通过的断言。其他非 fix 案例中，原来失败、现在仍失败的断言不会单独增加退化计数；当其余门槛满足时，整体仍可能通过。不能把通过解释成“所有回归案例都正确”，也不能据此保证清单之外的旧正确案例、或清单未标注的正确条件均未退化。
-
-最终测试/holdout 不进入本轮发布调参；重复 case_id、显式家族泄露等会被拒绝。确认人身份和反例说明的业务充分性仍由维护者负责。
-
-独立性检查针对该候选 `correction_ids` 引用的全部纠错，并非自动与整个历史纠错库隔离。与候选无关的历史材料是否适合进入回归集，还需要数据管理流程把关。
-
-### 7.4 为什么还要绑定工件摘要
-
-报告保存 manifest、索引、输出、可用原始输入及相关源码/配置的哈希。修改规则修订、改变发布集合或改变工件后，旧报告不能直接用于发布。当前源码摘要证明的是评测时读到了哪些文件，不证明生成两份输出时就使用了这些文件。
-
-独立案例的原始输入缺失时，评测器可依照保留的索引快照继续检查，并标记 `original_source_verified=false`；来源纠错的三个原文件仍会在发布时强制核对。
-
-## 8. 修订、发布与撤回如何切换
-
-状态不是 `revisions` 表里一个可以随意改写的 state 字段。读取时根据 `active` 与该修订的最后审核事件推导 candidate/published/superseded/withdrawn。
-
-| 动作 | 修订记录 | active 指针 | 新任务看到什么 |
-|---|---|---|---|
-| 创建 v1 候选 | 增加 v1 | 无 | 不看到此经验 |
-| 发布 v1 | v1 不变 | 指向 v1 | v1 |
-| 创建 v2 候选 | 增加 v2，v1 不变 | 仍指向 v1 | 仍是 v1 |
-| 发布 v2 | 两版内容均保留 | 改为 v2 | v2，v1 显示为 superseded |
-| 撤回当前经验 | 内容不删除，追加撤回事件 | 删除该经验指针 | 不看到此经验 |
-
-`list` 的 state 描述最新修订，`active_revision` 描述当前发布版本。看到最新 v2 是 candidate、active_revision 是 1，并不矛盾。
-
-撤回不自动恢复旧修订。若要重新启用历史版本，需要针对当前发布集合重新评测和发布，不能重复使用已经消耗的旧评测编号。
-
-已有任务始终使用自己的快照，包括撤回前已经冻结的经验。若需要马上停止某任务使用旧规则，应停止该任务并在新目录注册；当前实现不会远程修改运行中的快照。
-
-## 9. 谁能做什么，人工确认在哪里
-
-| 动作 | 日常抽取 agent | 维护 agent | 维护者 CLI |
-|---|---|---|---|
-| 按任务快照召回 | 允许 | 当前未开放此工具 | 可诊断读取 |
-| 查看指定纠错/经验修订 | 不允许 | 允许 | 允许 |
-| 提出候选经验 | 不允许 | 允许 | 允许 |
-| 执行给定输出的回归 | 不允许 | 允许 | 允许 |
-| 导入人工确认 | 不允许 | 不允许 | 允许 |
-| 发布、撤回 | 不允许 | 不允许 | 允许 |
-
-两类 agent 都禁止 shell、编辑和委派工具，避免借普通写文件能力绕开发布流程。日常抽取仍可以自动保存正式结果，不会逐篇等人批准；这不等于每篇结果都有人验收。
-
-人工承担三个不同判断：纠错结果是否正确、断言与家族划分是否可靠、归纳的规则是否适合影响后续任务。同一人可以承担多个角色，不要求重复审核同一标签，但不能用模型自评冒充人工真值。
-
-`confirmed_by`、`reviewer` 只是审计姓名，不是登录认证。哈希与 SQLite 不变约束用于一致性和追溯，不是防本机管理员篡改的签名。多用户服务的账号、审批界面与存储访问控制尚未实现。
-
-## 10. 从空库开始的实际操作顺序
-
-1. 确定私有文件与记忆目录。在导入 CLI 和启动 OpenCode 的终端中使用同一 `TERM_EXTRACT_MEMORY_DIR`；不设置时使用项目默认目录。
-2. 用 `import-correction` 导入已确认的 input/bad/gold 与修改原因，保存返回的 correction_id。
-3. 选择 `term-memory-curator`，让它围绕该纠错整理候选，得到 memory_id、revision、内容摘要。
-4. 在隔离评测流程准备 baseline/candidate 输出，人工确认关键参数断言与独立反例，建立 manifest。
-5. 调用 `term_memory_evaluate` 或评测 CLI，得到 evaluation_id；失败则修订候选或实验后重新评测。
-6. 用 `show`、`show-evaluation` 审阅具体内容，再执行 `publish`。命令参数见 [操作说明](../.opencode/skills/term-extract/references/experience.md)。
-7. 新建抽取会话与任务目录。新任务自动冻结发布集合，并在有相关疑点时召回。
-
-SQLite `list` 是查看库状态的入口；`memory_snapshot.json` 是查看某篇任务固定了哪些规则的入口；`final/run.json` 是查看该任务实际交付过哪些规则的入口。这三个问题不要混为一个。
-
-## 11. 当前实现范围与剩余工作
-
-| 能力 | 当前状态 |
+| 标识 | 含义 |
 |---|---|
-| 持久化纠错、不可变经验修订、审核与评测记录 | 已实现 |
-| 本地有限召回、冻结快照、交付回执、提交追溯 | 已实现 |
-| 经验候选与日常抽取隔离、CLI 发布门槛、撤回 | 已实现 |
-| 对给定两组输出做结构与关键标签断言比较 | 已实现 |
-| 自动批量运行 baseline/candidate、记录并核验实际推理配置 | 未实现，需要外部运行器 |
-| 证明候选经验被模型采用、证明改善的因果关系 | 未实现 |
-| 自动判断所有关键参数、关联与数量的业务正确性 | 未实现，依赖人工标签与断言覆盖 |
-| 语义向量检索、跨语言语义召回、规则冲突自动检测 | 未实现，当前为词语排序 |
-| 按模型自动隔离经验及验证跨模型迁移效果 | 未实现，同一数据库默认共用发布集合；可人为配置不同私有目录 |
-| 多用户认证、审批工作台 | 未实现，当前为本地 CLI 与 agent 权限隔离 |
-| 自动导入既有人工案例 | 未执行，默认库为空 |
+| `run_id` | 一次不可变生产提交；commit 返回在 `learning.run_id` |
+| `feedback_id` | 指向旧 run 的不可变反馈记录 |
+| `source_id` | 新来源编号；成功来源等于 run_id，纠错反馈来源等于 feedback_id |
+| `correction_id` | 旧版人工导入 input/before/after 的纠错编号 |
+| `memory_id + revision` | 一条经验及其不可变修订 |
+| `content_sha256` | 规则 payload 的规范 JSON 摘要 |
+| `evaluation_id` | 数据库内部不可变评测报告编号 |
+| `release_sha256` | 按编号排序后的 `[memory_id, revision, content_sha256]` 发布集合摘要 |
+| `snapshot_sha256` | 包含当前 index 绑定信息的任务快照摘要 |
 
-因此，当前落地的是**可控制的记忆存储、发布与消费流程，以及离线断言门槛**。它让经验无需训练模型即可进入下一篇任务，同时保留版本和撤回能力；实际质量收益仍需用真实实验和独立文档验证。
+`release_sha256` 不是递增版本号；相同集合可得到相同摘要。来源、候选、确认和评测有各自编号，不能拿 run_id 当经验编号或拿候选编号当发布证明。
 
-## 12. 代码阅读索引
+规则 payload 示意：
+
+```json
+{
+  "title": "核对独立清单中的采购量",
+  "issue_type": "quantity",
+  "triggers": ["采购数量", "purchase quantity"],
+  "applies_when": "正文与清单可通过明确采购编号确认是同一计量对象。",
+  "rule": "核对编号、单位和适用范围，再将清单数量作为证据。",
+  "exclusions": "编号不能对应，或者总计与单站配置的计量对象不同。",
+  "correction_ids": [],
+  "source_ids": ["run_example"]
+}
+```
+
+原七字段均必填，仅 `source_ids` 为可选新增字段。`correction_ids` 可为空；自动复盘候选用空 correction_ids 和对应 source_id。单条规范 JSON 最多 4096 字节。`issue_type` 仅有 missing_product、boundary、quantity、association，与最终结果的产品分类不同。程序检查结构与引用，不自动理解自然语言规则的正确性。
+
+## 3. 物理存储与保留要求
+
+使用 Python 标准库 SQLite，无向量库、embedding 或额外服务。默认私有目录为项目 `.term-memory/`；`TERM_EXTRACT_MEMORY_DIR` 可覆盖，配置的相对路径相对于项目根目录。仓库默认忽略 `.term-memory/`，自定义仓库内目录需要自行忽略。
+
+```text
+项目根目录/
+├── .opencode/skills/term-extract/       # 技能、通用规则和 Python 程序
+├── docs/memory-architecture.md         # 本文
+├── runs/任务目录/                     # 私有，本次任务资产
+│   ├── index.json
+│   ├── read_receipts.jsonl
+│   ├── memory_snapshot.json
+│   ├── memory_receipts.jsonl
+│   ├── draft/
+│   └── final/result.json、evidence.json、run.json
+└── .term-memory/                       # 私有，可外置
+    ├── memory.sqlite3                 # WAL 模式，可能有 -wal/-shm
+    └── learning-artifacts/<sha>.json   # 内容地址归档
+```
+
+空库只读查询不创建数据库；第一次需要写入运行、纠错或候选时创建。备份时应一致地处理 SQLite/WAL 与归档文件，同时保留被引用的原输入、index 和外部评测工件。
+
+### 3.1 十一张表的职责
+
+| 表 | 核心物理列 | 保存内容 |
+|---|---|---|
+| `learning_runs` | run_id、run_key、record_json、record_sha256 | 不可变运行及归档引用 |
+| `learning_feedback` | feedback_id、feedback_key、record_json、record_sha256 | 原话、旧 run、可选修正稿 |
+| `learning_sources` | source_id、record_json、record_sha256 | success/correction 类型及来源关联 |
+| `learning_confirmations` | source_id、record_json、record_sha256 | 人工确认人、家族、说明与时间 |
+| `learning_events` | event_key、record_json、record_sha256 | 复盘、标签证据与自动候选编号 |
+| `corrections` | correction_id、record_json、record_sha256 | 旧版已确认纠错 |
+| `revisions` | memory_id、revision、payload_json、content_sha256、created_at | 规则修订 |
+| `evaluations` | evaluation_id、memory_id、revision、report_json、report_sha256、created_at | 内部评测报告 |
+| `active` | memory_id、revision、evaluation_id | 当前发布指针，可更新或删除 |
+| `used_evaluations` | evaluation_id | 已发布消耗的报告，防止重用 |
+| `audit` | event_id、memory_id、revision、action、record_json、created_at | 发布、撤回审核历史 |
+
+除 active 外均由 SQLite 触发器禁止 UPDATE/DELETE。多数业务字段保存在 JSON 内，**状态不是 revisions 的物理 state 列**；查询时由 active 和该修订最后审核事件推导 candidate/published/superseded/withdrawn。
+
+### 3.2 哪些内容复制，哪些只留引用
+
+- 新运行把结果、证据和 run JSON 保存进数据库记录，并另存规范 JSON 加换行的内容地址文件；run 归档去掉稍后回写的 learning 摘要。反馈修正稿也这样归档。工作目录的最新 final 变化不会覆盖旧归档。
+- 原始标书和 index 只保留原路径、SHA 与绑定关系，不自动复制进 learning-artifacts；后续来源读取、确认、评测和发布会核对它们存在且未变。只备份数据库并不足够。
+- 旧 import-correction 在 corrections.record_json 内保存解析后的 before_json 和 after_json（分别限制 2 MiB），以及 input/before/after 的路径与哈希。before 无法解析时为 null，保留原文件引用；原输入正文不复制。展示纠错的 CLI/工具省略 before/after 正文，维护者仍可按指定引用复核。
+- 评测报告保留外部清单、索引、输出和相关源码/配置的摘要，不把所有评测数据复制进库。
+
+哈希、不可变记录与内容地址归档用于一致性和追溯，不是防本机管理员篡改的签名。确认人和审核人字符串是审计信息，实际权限依赖 agent 配置、操作系统和私有目录访问控制。
+
+## 4. 抽取、主动复盘与用户反馈
+
+### 4.1 注册、读取与正式提交
+
+prepare 解析真实标签输入，生成版本 2 index，并从 active 将全部已发布规则冻结到本任务快照。只向模型返回快照路径、摘要与数量等元数据；磁盘有完整快照不代表模型已经看过全库。
+
+主 agent 完整读取当前原文，保存短候选，按疑点召回并核验。正式提交需要七字段结果、证据 sidecar 与必填 reflection_json，仍检查全文读取覆盖、当前输入版本、标签/关联结构和 unresolved 为空。不满足条件时拒绝提交；没有逐篇人工批准步骤。
+
+reflection 顶层严格含 insights 与 no_experience_reason，每条 insight 严格含六个规则字段加 observation、evidence_tags。最多三条，标签必须来自本篇且不重复；无新经验必须给原因。详见 [字段表](../.opencode/skills/term-extract/references/experience.md)。程序不判断“观察是否真的发生”或规则是否足够新，主 agent 和后续人工承担该判断。
+
+提交成功后登记不可变 run，并返回 learning.run_id。运行身份由 index、结果、证据和 generation（模型、技能、引用规则、经验信息）计算；完全相同的登记可复用同一 run_id，结果或这些身份信息变化会得到新 run。工具不是每次调用都无条件创建不同事件。
+
+结果保存与学习登记分别报告：若 committed=true、learning.status=learning_failed，结果已经保存，但归档或复盘未完成。按 next_action 修复后重试或补齐，不能把这次状态称为经验已保存；演示提交跳过学习登记。工具内部通过临时 JSON 文件向 Python 传递较大的复盘和反馈，避免 Windows 命令行长度限制，对 agent 的 JSON 字符串接口不变。
+
+每条 insight 自动映射成候选 payload：保留六个规则字段，加入 correction_ids=[]、source_ids=[run_id]。observation 与 evidence_tags 留在复盘事件，供来源复核，不随每次经验召回展开。这一步只是保存和建立候选，不代表发现了语义正确的经验。
+
+### 4.2 Pending 与不可变补充
+
+CLI commit/register-run 可以不传复盘，此时运行显示 pending_reflection；OpenCode commit 始终要求复盘。term_memory_reflect 或 CLI reflect 可使用已读原文与结果补齐旧 pending。
+
+同一来源复盘一旦保存，不同内容不能覆盖；同样内容重复调用幂等。补充新事实应保存新反馈，规则优化则创建候选新 revision。来源确认也是不可变记录；不能修改姓名、家族或说明把旧事实换成新事实。
+
+### 4.3 用户反馈与修正稿
+
+term_memory_feedback 接收旧 run_id、用户原话 feedback_text、可选 after_result_json 和必填 reflection_json。原话保留首尾空白，agent 的分析另放复盘。after_result_json 是 agent 整理的完整七字段修正稿，工具只做结构与标签检查；confirm-feedback 前不能称为人工正确答案。
+
+没有足够依据时可以先只保存原话，不强造修正。需要修正最终结果时，先保存指向旧 run 的反馈，再根据原文核验、新提交；旧 run 保留。相同旧 run、原话和修正稿重复登记可复用 feedback_id；该反馈的 source_id 等于 feedback_id，类型 correction。
+
+若第一次未附修正稿，后续形成稿时必须再次登记：同一旧 run_id、同一用户原话，加上完整 after_result_json 和本次复盘。因为修正稿参与反馈身份计算，这会形成新的 feedback_id/source_id；旧的无稿反馈保留未确认。维护者确认新的带稿反馈，curator 以它作为纠错来源整理或修订候选。新结果 commit 不会自动补齐旧反馈，也不会把反馈改为指向新 run。若首次已具备完整稿，可以一次登记。
+
+反馈工具没有自填确认人的参数。只有人工 confirm-feedback 确认了实际不同的完整修正稿，才可用该来源评测；“用户说有错”和“已经人工核验完整修正”是两回事。CLI feedback 可省略复盘，保存明确无经验的空观察；不会像 register-run 一样留下待补复盘。
+
+confirm-run 用于核验旧运行正确并形成成功来源。若同一 run 后续出现已人工确认、实际修改结果的反馈纠错，原 success 来源会被拒绝继续用于评测或发布；记录本身仍保留。它不会自动撤回已 active 的经验，维护者须审阅受影响规则并决定是否 withdraw；新任务仍按 active 建快照，旧任务继续使用旧快照。单纯肯定反馈请走对应 run 的成功确认。
+
+## 5. 从任务快照到有限召回
+
+### 5.1 快照固定什么
+
+memory_snapshot.json 包含 schema_version=1、创建时间、index_sha256、release_sha256、完整已发布 memories 及 snapshot_sha256。每项 memory 保存编号、修订、content_sha256 与完整 payload；不包含来源标书、before/after 或整份评测报告。
+
+快照首次建立后不可覆盖，prepare 拒绝复用已有快照的输出目录，以免重置或混用回执。需要继续任务就沿用原 index；需要切换发布集合就新建目录。撤回不修改旧快照，旧任务可回放旧集合；要立即停止使用旧规则，应停止该任务并重新注册。
+
+### 5.2 当前检索的精确规则
+
+recall 读取当前任务快照，不查询最新 active：
+
+1. 小写英文和数字按 `[a-z0-9][a-z0-9_-]*` 分词，连续中文生成相邻双字集合。
+2. 可选 issue_type 做精确过滤。设 query 词集为 Q，triggers 为 T，title + applies_when + rule 为 B，`score = 3 × |Q∩T| + |Q∩B|`。
+3. 分数大于 0 可入选；分数降序，同分按 memory_id、revision 稳定排序。不必一定命中 triggers。
+4. 先取 top K，再在预算内交付完整条目；放不下就跳过，不截断，也不从 K 以外补位。budget_omitted 统计 top K 内因预算未交付的条目。
+
+exclusions 不参与打分但完整交付；分数不是置信度，程序不执行自然语言前提。默认 top3、6144 字节，OpenCode 可选 limit 1–5、预算 1024–8192 字节；Python 诊断 CLI 预算范围更宽。空库、无匹配或预算不足均可能返回空数组。
+
+主 agent 在当前会话阅读短规则，判断适用性并回原文取证。经验不自动改写结果；检索不调用辅助模型，但工具轮次和规则文本仍占主模型成本。没有疑点不必调用，不按每类设备反复查询。
+
+### 5.3 交付回执与 commit 追溯
+
+OpenCode 适配器先用 defer-receipt 获取结果，核对响应与快照绑定、实际序列化预算，再单独 record-delivery，确认 recorded=true 后返回。只有成功交付的规则记录到 memory_receipts.jsonl。
+
+回执包括时间、schema、snapshot/release/index 摘要和 delivered 列表，每项只有 memory_id、revision、content_sha256。空召回可记录空列表；不保存 query、分数、全文或“已采用”结论。
+
+commit 重新校验快照自身摘要、index 绑定和所有回执身份；缺失/损坏快照或回执不合法会拒绝提交。程序把实际交付条目按编号聚合去重写入 run.json.memory，七字段 result.json 保持不变。
+
+这些记录能回答“哪版规则被工具交付”，不能证明模型采用了哪条、采用是否正确，也不是足以逐字复现输出的完整模型请求记录。
+
+## 6. 来源确认、候选维护与评测
+
+### 6.1 人工确认与 curator 的分工
+
+维护者先用 list/show-run/show-source 查看运行与反馈，再通过 confirm-run 或 confirm-feedback 指定 confirmed_by、family_id、note。所有 source_ids 必须确认后才可评测和发布；旧 correction_ids 的人工导入记录兼容原通路。
+
+curator 可以读取指定来源及复盘证据，用 propose 整理最小规则和适用边界，或沿同一 memory_id 创建新修订；propose 可以先引用未确认来源，但不能跳过后续确认。新候选不修改 active，也不覆盖发布版。合并来源时必须保留真实依据，不能用无来源候选绕过审查。
+
+family_id 是人为分组：译文、修订版和近重复模板属于同一家族。程序能检查显式家族与相同输入 SHA，不能自动认识所有近重复材料。最终 holdout 不得参与本轮归纳和发布调参。
+
+### 6.2 两组输出从哪里来
+
+用户或外部实验流程准备 baseline、candidate 和人工关键参数断言 manifest。候选未发布，生产 recall 不会返回它；实验须在隔离上下文明确提供候选，不能为了试验先发布。
+
+评测器不调用抽取模型，不生成两组输出，不认证候选实际被注入。人工正确答案不能冒充 candidate 模型输出。当前没有自动批量运行、冻结全部推理参数并核验生成来源的实验运行器；需额外保留可比较配置和运行来源。源码哈希只是评测时读到的版本，不能证明生成结果时用了该版本。
+
+### 6.3 success 与 correction 自动分流
+
+模式由全部已确认来源推导，不在 manifest 手填：
+
+| 模式 | 来源 | 开发目标 |
+|---|---|---|
+| `success` | 仅成功来源 | 至少一个 role=success、split=development，家族与输入匹配来源；baseline 解析七字段 JSON 等于该来源已确认归档结果，两组断言均全通过 |
+| `correction` | 包含任意纠错，包括新反馈、旧 correction 或混合来源 | 至少一个 role=fix、split=development，从 baseline 有断言失败变为 candidate 全通过 |
+
+success baseline 的解析值比较忽略文件排版，报告记录 success_source_id 和 success_result_sha256。candidate 可以在合法结构与断言约束下不同于原结果。此绑定保护已确认基线不被另造，但不认证 candidate 的模型生成来源或因果收益。
+
+任意 success 目标 baseline 不过会使报告失败；所有 fix/success 目标 candidate 不过均计入 unfixed_target_cases。成功路径不需要制造 badcase，只证明在已确认开发案例上保持一致，并保护清单列出的旧正确条件。
+
+### 6.4 人工断言怎样判断采购对象
+
+anchor_tag 必须位于唯一 normal/separate 记录自身范围；零匹配是漏对象，多匹配是歧义。object_key 仅用于报告显示，标题与产品分类不用于对象匹配。
+
+有效参数范围是：主体自身 + separate 关联的 normal/separate 连通分量 + 直接指向这些成员的 general。不会沿 general 扩散到它约束的另一设备。程序不能自动证明 separate 业务身份正确，需 forbidden_tags 等边界断言保护。
+
+| 断言 | 实际检查 | 局限 |
+|---|---|---|
+| required_tags | 有效参数范围覆盖标签 | 不认识未标注的重要参数 |
+| forbidden_tags | 范围不包含标签 | 不自动识别标签内部混合参数 |
+| quantity | anchor 主体数量字符串精确相等 | 不做数值/单位归一化或所有 separate 一致性验收 |
+| clause_category | anchor 主体分类精确相等 | 不验收全文所有 general/separate 语义 |
+
+顺序按 index 原文 order，不按标签数字。允许未被禁止的无害冗余，不要求边界与金标准完全一致；general 不单独作为 anchor 主体。两组结果先做结构校验，error 失败；这里不要求 evidence，warnings 本身不失败。
+
+### 6.5 硬门槛、独立性与报告绑定
+
+| 门槛 | 要求 |
+|---|---|
+| 模式目标 | correction 的 fix_improvements ≥ 1；success 的 success_cases ≥ 1 |
+| unfixed_target_cases | 0；success baseline 失败也硬拒绝 |
+| regressions | 0，按 baseline 已通过而 candidate 失败的断言计数 |
+| independent_regression_cases | ≥ 1；非开发目标，独立于全部来源，两组均全通过 |
+| counterexample_cases | ≥ 1；同样独立、两组全通过，另有不适用说明与边界断言 |
+
+独立性要求家族不同且输入 SHA 不同，针对该候选引用的全部来源，不自动与全历史库隔离。同一合格反例可兼作独立回归，所以最小清单可由一个开发目标和一个独立反例组成；覆盖范围仍应随规则影响扩大。
+
+无退化只针对清单中 baseline 已通过的断言。非目标中 baseline/candidate 都失败的条件不会单独算退化，其他门槛够时仍可能通过；不能说“所有回归案例都正确”或“未标注参数无退化”。
+
+报告绑定候选内容、当前 release、source_ids 对应的确认摘要 source_confirmations、全部来源身份、manifest/index/输出、来源不可变归档和相关代码/配置。旧 correction_ids 沿用人工导入记录。来源与工件在入库和发布时重核。独立评测案例原输入缺失时可按保留 index 检查，并记 original_source_verified=false；学习来源本身的原输入、index、归档与旧纠错原文件仍须有效。
+
+## 7. 发布、修订和撤回
+
+publish 仅为人工 CLI。事务核对候选、数据库内部评测报告、当前 release、所有来源确认和外部工件；报告须通过且未使用。通过后追加 audit、记录 used_evaluations 并切换 active。报告绑定的集合或文件变化就要重新评测，不允许复用外部伪造报告绕过内部记录。
+
+| 动作 | 内容与当前发布状态 | 新任务 |
+|---|---|---|
+| 创建 v1 候选 | 增加修订，无 active | 看不到 |
+| 发布 v1 | 内容不变，active 指向 v1 | 固定 v1 |
+| 创建 v2 候选 | 保留两版，active 仍为 v1 | 仍固定 v1 |
+| 发布 v2 | active 改为 v2，v1 为 superseded | 固定 v2 |
+| 撤回 | 删除 active，保留内容和审核事件 | 不再固定该经验 |
+
+list 的 state 描述最新修订，active_revision 描述当前发布版，因此最新 v2=candidate、active_revision=1 可以同时成立。撤回不自动恢复旧版；重新启用须针对当前集合重新评测发布，旧评测编号即使撤回后也不能重复使用。旧任务快照始终保留。
+
+## 8. 工具权限与人工边界
+
+| 动作 | extractor | curator | 维护者 CLI |
+|---|---|---|---|
+| 按任务快照 recall | 允许 | 未开放 | 可诊断 |
+| feedback / reflect | 两者允许 | 仅 reflect | 允许 |
+| 读指定 source/correction/revision | 不允许 | 允许 | 允许 |
+| propose / evaluate | 不允许 | 允许 | 允许 |
+| import-correction / confirm-run / confirm-feedback | 不允许 | 不允许 | 允许 |
+| publish / withdraw | 不允许 | 不允许 | 允许 |
+
+两类 agent 都禁 shell、编辑与委派，extractor 普通文件读取另限技能资料和当前候选；不会通过私有数据库或历史 final 找本篇答案。权限阻止在正常 agent 流程自填确认人，但不替代本机账号和文件权限。
+
+人工负责确认案例、断言/家族划分和规则适用边界三个判断。可以由同一维护者承担，不要求重复核验同一事实；成功确认不能替代泛化审阅，评测通过也不能自动批准发布。
+
+## 9. 当前实现与剩余限制
+
+| 能力 | 状态与边界 |
+|---|---|
+| 不可变运行、主动复盘、原话反馈、来源确认 | 已实现；反思由 agent 显式调用触发，无后台监听 |
+| 来源关联候选、修订、有限召回、快照、回执 | 已实现；候选隔离，交付不等于采用 |
+| success/correction 离线门槛、人工发布与撤回 | 已实现；只针对提供的工件和断言 |
+| 自动生成两组输出与核验完整推理配置 | 未实现，依赖外部实验流程 |
+| 自动判断全面业务正确、经验因果收益 | 未实现，当前尚无真实效果验证 |
+| 向量/跨语言语义召回、规则冲突自动检测 | 未实现，当前为词语排序与主 agent 判断 |
+| 按模型隔离经验、跨模型效果保证 | 未实现；同库共用发布集合，可人为外置不同库 |
+| 多用户认证与审批工作台 | 未实现，当前为本地 CLI 与 agent 权限隔离 |
+
+## 10. 代码阅读索引
 
 | 代码 | 关注点 |
 |---|---|
-| [memory_store.py](../.opencode/skills/term-extract/scripts/memory_store.py) | `_SCHEMA`、`import_correction`、`propose`、`publish`、`create_snapshot`、`recall`、`run_memory_record` |
-| [memory_evaluate.py](../.opencode/skills/term-extract/scripts/memory_evaluate.py) | `_evaluate_assertion`、`evaluate_manifest`、五个门槛及工件哈希 |
-| [term_memory.ts](../.opencode/tools/term_memory.ts) | OpenCode 工具参数、实际字节校验、延迟回执、评测摘要 |
-| [term_document.ts](../.opencode/tools/term_document.ts) | 注册时固定快照、禁止覆盖已存在任务 |
-| [commit_result.py](../.opencode/skills/term-extract/scripts/commit_result.py) | 读取覆盖、快照验证、结果与记忆追溯记录 |
-| [term-extractor.md](../.opencode/agents/term-extractor.md) | 日常只读经验权限 |
-| [term-memory-curator.md](../.opencode/agents/term-memory-curator.md) | 候选整理与回归权限，不提供发布工具 |
+| [memory_learning.py](../.opencode/skills/term-extract/scripts/memory_learning.py) | register_run、validate_reflection、record_feedback、来源与人工确认 |
+| [memory_store.py](../.opencode/skills/term-extract/scripts/memory_store.py) | 表结构、修订/发布、create_snapshot、recall、run_memory_record |
+| [memory_evaluate.py](../.opencode/skills/term-extract/scripts/memory_evaluate.py) | 来源推导、success 基线绑定、断言、门槛与工件哈希 |
+| [term_memory.ts](../.opencode/tools/term_memory.ts) | 召回预算与回执、feedback/source/reflect、维护工具 |
+| [term_result.ts](../.opencode/tools/term_result.ts) | 必填 reflection_json 与正式提交入口 |
+| [term_document.ts](../.opencode/tools/term_document.ts) | 注册时固定快照，拒绝覆盖旧任务 |
+| [commit_result.py](../.opencode/skills/term-extract/scripts/commit_result.py) | 读取覆盖、快照、结果及学习登记 |
+| [term-extractor.md](../.opencode/agents/term-extractor.md) | 抽取与主动复盘职责 |
+| [term-memory-curator.md](../.opencode/agents/term-memory-curator.md) | 来源整理、候选与离线评测权限 |

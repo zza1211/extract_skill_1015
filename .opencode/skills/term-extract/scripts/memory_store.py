@@ -50,6 +50,21 @@ CREATE TABLE IF NOT EXISTS audit (
  event_id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, revision INTEGER NOT NULL,
  action TEXT NOT NULL, record_json TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS learning_runs (
+ run_id TEXT PRIMARY KEY, run_key TEXT NOT NULL UNIQUE, record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learning_feedback (
+ feedback_id TEXT PRIMARY KEY, feedback_key TEXT NOT NULL UNIQUE, record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learning_sources (
+ source_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learning_confirmations (
+ source_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learning_events (
+ event_key TEXT PRIMARY KEY, record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL
+);
 """
 
 
@@ -138,7 +153,8 @@ def _db(root: Path, *, write: bool = False):
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(_SCHEMA)
             # 内容表仅允许追加；发布状态用独立活动指针与审计事件表示。
-            for table in ("corrections", "revisions", "evaluations", "audit", "used_evaluations"):
+            for table in ("corrections", "revisions", "evaluations", "audit", "used_evaluations",
+                          "learning_runs", "learning_feedback", "learning_sources", "learning_confirmations", "learning_events"):
                 for operation in ("UPDATE", "DELETE"):
                     connection.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{operation.lower()} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'immutable record'); END")
             connection.execute("BEGIN IMMEDIATE")
@@ -162,8 +178,8 @@ def _db(root: Path, *, write: bool = False):
 
 
 def _payload(payload: Any) -> dict:
-    if not isinstance(payload, dict) or set(payload) != PAYLOAD_FIELDS:
-        raise MemoryError("经验 payload 必须且只能含 title/issue_type/triggers/applies_when/rule/exclusions/correction_ids。")
+    if not isinstance(payload, dict) or not PAYLOAD_FIELDS <= set(payload) or set(payload) - PAYLOAD_FIELDS - {"source_ids"}:
+        raise MemoryError("经验 payload 必须含原七字段，仅可额外含 source_ids。")
     kind = payload["issue_type"]
     if not isinstance(kind, str) or kind not in ISSUE_TYPES:
         raise MemoryError("issue_type 不在支持范围内。")
@@ -171,7 +187,10 @@ def _payload(payload: Any) -> dict:
               "applies_when": _string(payload["applies_when"], "applies_when", 1000),
               "rule": _string(payload["rule"], "rule", 2400),
               "exclusions": _string(payload["exclusions"], "exclusions", 1200)}
-    for key, count, size in (("triggers", 12, 100), ("correction_ids", 50, 128)):
+    lists = [("triggers", 12, 100), ("correction_ids", 50, 128)]
+    if "source_ids" in payload:
+        lists.append(("source_ids", 50, 128))
+    for key, count, size in lists:
         values = payload[key]
         if not isinstance(values, list) or len(values) > count or (key == "triggers" and not values):
             raise MemoryError(f"{key} 必须为字符串数组，最多 {count} 项；triggers 不能为空。")
@@ -257,19 +276,27 @@ def _check_correction_files(record: dict) -> None:
             raise MemoryError(f"纠错依据文件已变化：{path_key}；请重新人工导入并评测。")
 
 
-def propose(root: Path, payload: dict, memory_id=None) -> dict:
+def _insert_candidate(connection, payload: dict, memory_id=None) -> dict:
     payload = _payload(payload)
     selected_id = _string(memory_id, "memory_id", 128) if memory_id is not None else "mem_" + uuid.uuid4().hex
-    with _db(root, write=True) as connection:
-        for correction_id in payload["correction_ids"]:
-            _correction(connection, correction_id)
-        latest = connection.execute("SELECT MAX(revision) FROM revisions WHERE memory_id=?", (selected_id,)).fetchone()[0]
-        if memory_id is not None and latest is None:
-            raise MemoryError("修订目标不存在；新经验请省略 memory_id。")
-        revision = (latest or 0) + 1
-        sha = _hash(payload)
-        connection.execute("INSERT INTO revisions VALUES (?,?,?,?,?)", (selected_id, revision, _canonical(payload).decode(), sha, _now()))
+    for correction_id in payload["correction_ids"]:
+        _correction(connection, correction_id)
+    if payload.get("source_ids"):
+        from memory_learning import _source
+        for source_id in payload["source_ids"]:
+            _source(connection, source_id)
+    latest = connection.execute("SELECT MAX(revision) FROM revisions WHERE memory_id=?", (selected_id,)).fetchone()[0]
+    if memory_id is not None and latest is None:
+        raise MemoryError("修订目标不存在；新经验请省略 memory_id。")
+    revision = (latest or 0) + 1
+    sha = _hash(payload)
+    connection.execute("INSERT INTO revisions VALUES (?,?,?,?,?)", (selected_id, revision, _canonical(payload).decode(), sha, _now()))
     return {"memory_id": selected_id, "revision": revision, "content_sha256": sha, "state": "candidate"}
+
+
+def propose(root: Path, payload: dict, memory_id=None) -> dict:
+    with _db(root, write=True) as connection:
+        return _insert_candidate(connection, payload, memory_id)
 
 
 def load_candidate(root: Path, memory_id, revision) -> dict:
@@ -291,13 +318,36 @@ def _validate_report(report: Any, candidate: dict, base_release: str) -> dict:
     if report.get("status") not in ("passed", "failed"):
         raise MemoryError("评测 status 只能为 passed/failed。")
     summary = report.get("summary")
-    if not isinstance(summary, dict) or set(summary) != SUMMARY_FIELDS:
+    mode = report.get("evaluation_mode", "correction")
+    if mode not in ("correction", "success"):
+        raise MemoryError("evaluation_mode 只允许 correction/success。")
+    expected = SUMMARY_FIELDS | ({"success_cases"} if "evaluation_mode" in report else set())
+    if not isinstance(summary, dict) or set(summary) != expected:
         raise MemoryError("评测 summary 字段不完整或存在额外字段。")
-    for key in SUMMARY_FIELDS:
+    for key in expected:
         _integer(summary[key], "summary." + key, 0)
     if len(_canonical(report)) > 1024 * 1024:
         raise MemoryError("评测报告超过 1 MiB。")
     return report
+
+
+def _check_learning_sources(connection, payload: dict, report: dict) -> None:
+    if not payload.get("source_ids"):
+        if report.get("evaluation_mode", "correction") != "correction":
+            raise MemoryError("成功经验评测必须绑定人工确认的成功来源。")
+        return
+    from memory_learning import _get_sources
+    sources = _get_sources(connection, payload, require_confirmed=True)
+    mode = "correction" if any(item["kind"] == "correction" for item in sources) else "success"
+    if report.get("evaluation_mode") != mode:
+        raise MemoryError("评测模式与已确认来源类型不一致，不能绕过纠错门槛。")
+    expected = sorted([{"source_id": item["source_id"], "confirmation_sha256": item["confirmation_sha256"]}
+                       for item in sources if item["source_id"] in payload["source_ids"]], key=lambda item: item["source_id"])
+    actual = report.get("source_confirmations")
+    if not isinstance(actual, list) or any(not isinstance(item, dict) or set(item) != {"source_id", "confirmation_sha256"} for item in actual):
+        raise MemoryError("评测必须绑定全部新来源的人工确认记录哈希。")
+    if sorted(actual, key=lambda item: str(item["source_id"])) != expected:
+        raise MemoryError("评测来源确认记录与当前候选不一致。")
 
 
 def register_evaluation(root: Path, memory_id, revision, report: dict) -> dict:
@@ -306,6 +356,7 @@ def register_evaluation(root: Path, memory_id, revision, report: dict) -> dict:
     with _db(root, write=True) as connection:
         candidate = _candidate(connection, _string(memory_id, "memory_id", 128), _integer(revision, "revision"))
         report = _validate_report(report, candidate, _release(_published(connection)))
+        _check_learning_sources(connection, candidate["payload"], report)
         evaluation_id, sha = "eval_" + uuid.uuid4().hex, _hash(report)
         connection.execute("INSERT INTO evaluations VALUES (?,?,?,?,?,?)", (evaluation_id, memory_id, revision, _canonical(report).decode(), sha, _now()))
     return {"evaluation_id": evaluation_id, "report_sha256": sha, "status": report["status"], "summary": report["summary"]}
@@ -354,12 +405,14 @@ def publish(root: Path, memory_id, revision, evaluation_id, reviewer: str, note:
         if evaluation["memory_id"] != memory_id or evaluation["revision"] != revision:
             raise MemoryError("评测记录属于其他候选修订。")
         report = _validate_report(evaluation["report"], candidate, _release(_published(connection)))
+        _check_learning_sources(connection, candidate["payload"], report)
         summary = report["summary"]
-        if not (report["status"] == "passed" and summary["fix_improvements"] >= 1 and summary["regressions"] == 0
+        target_passed = summary.get("success_cases", 0) >= 1 if report.get("evaluation_mode") == "success" else summary["fix_improvements"] >= 1
+        if not (report["status"] == "passed" and target_passed and summary["regressions"] == 0
                 and summary["independent_regression_cases"] >= 1 and summary["counterexample_cases"] >= 1 and summary["unfixed_target_cases"] == 0):
-            raise MemoryError("发布门槛未通过：需有修复改善、独立回归和反例，且无退化或未修复目标。")
-        if not candidate["payload"]["correction_ids"]:
-            raise MemoryError("发布必须有人工确认的来源纠错。")
+            raise MemoryError("发布门槛未通过：需有修复改善或成功案例、独立回归和反例，且无退化或未通过目标。")
+        if not candidate["payload"]["correction_ids"] and not candidate["payload"].get("source_ids"):
+            raise MemoryError("发布必须有人工确认的来源。")
         for correction_id in candidate["payload"]["correction_ids"]:
             _check_correction_files(_correction(connection, correction_id))
         _check_artifacts(report)

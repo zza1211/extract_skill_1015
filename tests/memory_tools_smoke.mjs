@@ -84,7 +84,8 @@ async function draft(prepared) {
 
 async function commit(prepared, checked) {
   return invoke(results.commit, { index_path: prepared.index_path, result_path: checked.result_path,
-    evidence_path: checked.evidence_path, model_id: "synthetic-memory-protocol-test" });
+    evidence_path: checked.evidence_path, model_id: "synthetic-memory-protocol-test",
+    reflection_json: JSON.stringify({ insights: [], no_experience_reason: "合成协议测试，不归纳新的业务经验。" }) });
 }
 
 async function memoryReceipts(prepared) {

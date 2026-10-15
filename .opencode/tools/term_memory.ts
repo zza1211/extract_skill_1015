@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin";
-import { output, projectRoot, python, resolveFile } from "../skills/term-extract/scripts/opencode_bridge.ts";
+import { output, projectRoot, python, resolveFile, withJsonFile } from "../skills/term-extract/scripts/opencode_bridge.ts";
 
 const issueTypes = ["missing_product", "boundary", "quantity", "association"] as const;
 
@@ -42,6 +42,46 @@ export const correction = tool({
   },
 });
 
+export const feedback = tool({
+  description: "记录用户对本次已提交抽取的反馈原话、可选修正结果及经验候选，关联原 run_id。只收集依据，不代表人工验收，不发布；没有用户反馈不得自行编造。",
+  args: {
+    run_id: tool.schema.string().min(1).describe("term_result_commit 返回的 learning.run_id；修正前那次运行的编号"),
+    feedback_text: tool.schema.string().min(1).describe("用户明确反馈的原话；不得将 agent 自评写成用户确认"),
+    after_result_json: tool.schema.string().optional().describe("修正后的完整七字段结果数组；未形成修正结果可省略"),
+    reflection_json: tool.schema.string().describe("与提交相同的复盘 JSON；基于本次反馈归纳候选，无新经验则填写原因"),
+  },
+  async execute(args, context) {
+    const root = projectRoot(context.directory);
+    const request = { feedback_text: args.feedback_text, reflection: JSON.parse(args.reflection_json),
+      after_result: args.after_result_json === undefined ? null : JSON.parse(args.after_result_json) };
+    return withJsonFile(request, async file => output(await python(root, "memory_learning.py",
+      ["--project-root", root, "feedback", "--run-id", args.run_id, "--request-file", file])));
+  },
+});
+
+export const reflect = tool({
+  description: "为已登记但待复盘的本次运行补交经验候选。与已有复盘相同则幂等；候选未经确认不能被日常召回。",
+  args: {
+    run_id: tool.schema.string().min(1),
+    reflection_json: tool.schema.string().describe("{insights:[...],no_experience_reason}；格式与 term_result_commit 相同"),
+  },
+  async execute(args, context) {
+    const root = projectRoot(context.directory);
+    return withJsonFile(JSON.parse(args.reflection_json), async file =>
+      output(await python(root, "memory_learning.py", ["--project-root", root, "reflect",
+        "--run-id", args.run_id, "--reflection-file", file])));
+  },
+});
+
+export const source = tool({
+  description: "供经验维护读取某条自动复盘或用户反馈依据及确认状态；返回摘要和文件引用，不自动确认。",
+  args: { source_id: tool.schema.string().min(1) },
+  async execute(args, context) {
+    const root = projectRoot(context.directory);
+    return output(await python(root, "memory_learning.py", ["--project-root", root, "show-source", "--source-id", args.source_id]));
+  },
+});
+
 export const show = tool({
   description: "供经验维护任务按编号查看某个不可变修订；候选仅用于维护，不供日常抽取采用。",
   args: { memory_id: tool.schema.string().min(1), revision: tool.schema.number().int().min(1) },
@@ -52,7 +92,7 @@ export const show = tool({
 });
 
 export const propose = tool({
-  description: "仅供经验维护任务：根据已有人工纠错创建候选经验修订，必须说明适用条件和不适用情况；不会发布或影响日常抽取。",
+  description: "仅供经验维护任务：根据纠错或 source_ids 来源创建/修订候选，必须说明适用条件和不适用情况。未经确认的来源不能评测发布；候选不影响日常抽取。",
   args: {
     payload_json: tool.schema.string().describe("经验 JSON 对象，字段见 references/experience.md"),
     memory_id: tool.schema.string().optional().describe("修订已有经验时填写；不覆盖旧修订"),

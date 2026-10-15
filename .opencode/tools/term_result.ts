@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { digest, output, projectRoot, python, resolveFile, saveDraft } from "../skills/term-extract/scripts/opencode_bridge.ts";
+import { digest, output, projectRoot, python, resolveFile, saveDraft, withJsonFile } from "../skills/term-extract/scripts/opencode_bridge.ts";
 
 export const checkpoint = tool({
   description: "保存主 agent 的简短采购对象候选、区间、数量来源和疑点，供后续核验或中断恢复；不是最终提交，不判断候选语义。",
@@ -26,7 +26,7 @@ export const checkpoint = tool({
       status: "candidate_checkpoint",
       index_sha256: await digest(indexPath),
       source_path: index.source_path,
-      skill_version: "0.2.0",
+      skill_version: "0.3.0",
       candidates,
       notes: args.notes ?? "",
     }, null, 2) + "\n", "utf8");
@@ -53,19 +53,25 @@ export const validate = tool({
 });
 
 export const commit = tool({
-  description: "核对草稿、读取回执及未解决事项后保存最终结果。仅记录主 agent 的决定，不调用其他抽取模型。",
+  description: "核对并保存最终结果，同时登记本次运行、保存主 agent 的简短复盘和未验证经验候选。无新经验可明确说明，不调用其他模型，不自动发布。",
   args: {
     index_path: tool.schema.string(),
     result_path: tool.schema.string().describe("term_result_validate 返回的草稿路径"),
     evidence_path: tool.schema.string(),
+    reflection_json: tool.schema.string().describe("本次复盘 JSON：{insights:[{title,issue_type,triggers,applies_when,rule,exclusions,observation,evidence_tags}],no_experience_reason}。最多三条；无新经验时 insights=[] 并填写原因。依据须来自本次原文和实际核验，不复制具体答案。"),
     model_id: tool.schema.string().optional().describe("当前 OpenCode 主模型标识，用于回放记录"),
     allow_demo: tool.schema.boolean().default(false),
   },
   async execute(args, context) {
     const root = projectRoot(context.directory);
     const indexPath = resolveFile(root, args.index_path);
-    const argv = ["--index", indexPath, "--result", resolveFile(root, args.result_path), "--evidence", resolveFile(root, args.evidence_path), "--receipts", path.join(path.dirname(indexPath), "read_receipts.jsonl"), "--out-dir", path.join(path.dirname(indexPath), "final"), "--model-id", args.model_id || "未记录"];
+    if (typeof args.reflection_json !== "string" || !args.reflection_json.trim()) {
+      throw new Error("提交需附带本次简短复盘；没有新经验时传 insights=[] 和 no_experience_reason，不得编造经验。");
+    }
+    const reflection = JSON.parse(args.reflection_json);
+    const argv = ["--project-root", root, "--index", indexPath, "--result", resolveFile(root, args.result_path), "--evidence", resolveFile(root, args.evidence_path), "--receipts", path.join(path.dirname(indexPath), "read_receipts.jsonl"), "--out-dir", path.join(path.dirname(indexPath), "final"), "--model-id", args.model_id || "未记录"];
     if (args.allow_demo) argv.push("--allow-demo");
-    return output(await python(root, "commit_result.py", argv));
+    return withJsonFile(reflection, async file =>
+      output(await python(root, "commit_result.py", [...argv, "--reflection-file", file])));
   },
 });

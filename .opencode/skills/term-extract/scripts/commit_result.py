@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from memory_store import run_memory_record
+from memory_learning import register_run, record_reflection, validate_reflection
 
 
 def load_json(path: Path):
@@ -83,11 +84,20 @@ def main() -> int:
     parser.add_argument("--receipts", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--model-id", default="未记录")
+    parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[4])
+    reflection_input = parser.add_mutually_exclusive_group()
+    reflection_input.add_argument("--reflection-json", help="主 agent 的简短复盘；旧 CLI 省略时登记为待复盘，不伪造经验。")
+    reflection_input.add_argument("--reflection-file", type=Path, help="复盘 JSON 文件，避免 Windows 命令行长度限制。")
     parser.add_argument("--allow-demo", action="store_true", help="只保存明确标注为演示的结果")
     args = parser.parse_args()
     try:
         index_path = Path(args.index).resolve()
         index = load_json(index_path)
+        reflection = None
+        if args.reflection_json is not None or args.reflection_file is not None:
+            from memory_store import _parse, _read_json
+            raw_reflection = _read_json(args.reflection_file, 64 * 1024) if args.reflection_file else _parse(args.reflection_json)
+            reflection = validate_reflection(raw_reflection, index)
         result = load_json(Path(args.result))
         evidence = load_json(Path(args.evidence))
         validator = Path(__file__).with_name("validate_result.py")
@@ -127,7 +137,7 @@ def main() -> int:
             "status": "demo_submitted" if demo else "submitted",
             "production_submittable": not demo,
             "model_id": args.model_id,
-            "skill_version": "0.2.0",
+            "skill_version": "0.3.0",
             "skill_sha256": hashlib.sha256(skill_path.read_bytes()).hexdigest(),
             "reference_sha256": reference_hashes,
             "source_path": index.get("source_path"),
@@ -144,7 +154,20 @@ def main() -> int:
         result_path.write_text(result_text, encoding="utf-8", newline="\n")
         evidence_path.write_text(evidence_text, encoding="utf-8", newline="\n")
         record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-        print(json.dumps({"committed": True, "status": record["status"], "result_path": str(result_path), "evidence_path": str(evidence_path), "run_path": str(record_path), "production_submittable": not demo, "semantic_validation": record["semantic_validation"]}, ensure_ascii=False))
+        learning = ({"status": "demo_skipped", "notice": "演示运行不进入经验库。"}
+                    if demo else {"status": "pending_registration"})
+        if not demo:
+            # 抽取结果已经保存。学习失败单独报告，不把已提交结果误报为失败。
+            try:
+                learning = register_run(args.project_root, index_path, result_path, evidence_path, record_path)
+                if reflection is not None:
+                    learning = {**learning, **record_reflection(args.project_root, learning["run_id"], reflection)}
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                learning = {**learning, "status": "learning_failed", "error": str(error),
+                            "next_action": "抽取结果已保存；修复学习存储后，用同样参数重试提交，或按 run_id 补交复盘。"}
+        record["learning"] = learning
+        record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+        print(json.dumps({"committed": True, "status": record["status"], "result_path": str(result_path), "evidence_path": str(evidence_path), "run_path": str(record_path), "production_submittable": not demo, "semantic_validation": record["semantic_validation"], "learning": learning}, ensure_ascii=False))
         return 0
     except (OSError, ValueError, TypeError, KeyError) as error:
         print(json.dumps({"committed": False, "errors": [str(error)]}, ensure_ascii=False))

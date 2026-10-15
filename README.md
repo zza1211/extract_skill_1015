@@ -10,7 +10,7 @@
 
 如果已经在运行 OpenCode，新增或修改配置后退出并重新启动，以加载本项目配置。
 
-当前版本为 0.2.0：保留同一段落/单元格中的多个真实 `<Cxx>` 标签和紧凑原文交付，七字段输出不变；新增独立的经验维护、离线回归和人工发布流程。旧任务需在新工作目录重新 `prepare`，以固定经验快照；文档索引仍为版本 2。
+当前版本为 0.3.0：七字段输出与文档索引版本 2 保持不变；正式提交增加主动复盘，自动保存不可变 run 和未验证经验候选，支持用户反馈与来源确认。成功经验可经过保护原有正确场景的回归后发布，无需制造 badcase。旧任务仍需使用新工作目录注册，固定本轮发布快照。
 
 克隆仓库后，从仓库根目录启动 OpenCode，避免父目录项目配置影响技能发现：
 
@@ -47,7 +47,7 @@ opencode
 - `.opencode/tools/`：OpenCode 文档与结果工具。
 - `.opencode/skills/term-extract/scripts/`：无模型调用的 Python 辅助程序。
 - `runs/`：每次运行的索引、读取回执、草稿、校验报告和最终结果；不提交版本库。
-- `.term-memory/`：私有 SQLite 经验、审核及评测记录，Git 忽略；可外置到 `TERM_EXTRACT_MEMORY_DIR`。
+- `.term-memory/`：私有经验、不可变运行、反馈、来源确认及评测记录，Git 忽略；可外置到 `TERM_EXTRACT_MEMORY_DIR`。
 
 配置关闭自动会话压缩，以免原文变成摘要。关闭压缩不会扩大模型窗口；如果总上下文超限，任务应报告未完成。每篇标书开新会话。读取回执只证明原文已交付，不证明主模型正确理解。项目显式设置工具输出阈值，文档工具再控制分页大小，避免原文被 OpenCode 截断。
 
@@ -74,6 +74,7 @@ python -X utf8 -m unittest discover -s .opencode/skills/term-extract/scripts -p 
 node tests/tool_smoke.mjs
 node tests/checkpoint_smoke.mjs
 node tests/memory_tools_smoke.mjs
+node tests/learning_tools_smoke.mjs
 ```
 
 真实文件检查需要另行提供带标签的 JSON 目录，不会调用模型：
@@ -96,13 +97,21 @@ node tests/structured_json_smoke.mjs 'D:\你的目录\structured_json'
 
 同一采购对象的 separate 片段不能仅因局部没有数量就填写“未提及”，应核对关联条款与采购清单；校验器以 `SEPARATE_QUANTITY_MISSING_REVIEW` 提示可疑缺失，不自动复制数量。
 
-每次提交在 `run.json` 记录模型标识、输入与结果哈希、技能/规则哈希、经验快照和实际交付的经验修订。仓库不附带案例或记忆数据库。
+`term_result_commit` 必须同时提交 `reflection_json`：最多三条有原文标签支撑的可迁移观察，或明确说明本篇没有新经验。记录本次疑点、核验动作或自我修正，不复述既有业务规则或召回经验，不保存内部思维链。成功后返回 `learning.run_id`，持久化不可变运行与未验证候选，记录输入、结果、规则版本、经验快照和交付清单。工作目录的最新结果视图可更新，旧 run 不被覆盖。复盘字段见 [经验记忆说明](.opencode/skills/term-extract/references/experience.md)。
+
+若结果已保存但 `learning.status=learning_failed`，应按提示补齐归档或复盘，不把结果提交成功等同于经验已保存。演示运行不进入经验库。
 
 ## 经验演进
 
-流程为：人工导入已确认纠错 → `term-memory-curator` 整理候选 → 对给定 baseline/candidate 输出运行回归 → 维护者通过 CLI 审核发布 → 后续抽取按需召回。
+空库也可以从第一篇开始：抽取 → 主 agent 主动复盘并提交 → 工具保存 run、来源和未验证候选 → 用户反馈或维护者确认来源 → curator 整理与评测 → 人工 CLI 发布 → 第二篇新任务按需召回。没有后台会话监听，也不会额外调用模型自动分析每段聊天。
 
-候选不参与日常抽取，agent 不能批准自身经验。发布需修复目标问题、没有已有断言退化，并通过独立反例；报告绑定经验修订和评测文件哈希。评测工具不自动启动模型，也不能证明改善必然由经验造成。日常抽取无需等待人工审批。
+收到用户反馈时，extractor 用 `term_memory_feedback` 保存旧 `run_id`、反馈原话、复盘和可选修正稿，再按原文修正并新提交。修正稿在人工 `confirm-feedback` 前不是人工正确答案。CLI 直接提交而未附复盘时会留下 pending，可用 `reflect` 补齐；空 `insights` 须说明原因，不机械凑经验。
+
+若先只存原话，形成修正稿后须用同一旧 run_id、同一原话和完整稿再次登记，确认新的带稿 feedback_id；新提交不会补齐旧反馈，旧记录保留未确认。首次已有完整稿可一次记录。
+
+候选不参与生产召回。来源须经 `confirm-run` 或 `confirm-feedback` 确认后才能评测或发布；确认运行正确不等于批准泛化规则。纯成功来源自动采用 success 评测：基线绑定已确认运行，两组断言均通过，并保护独立回归与反例。纠错或混合来源仍须证明 fix 改善。所有模式都禁止已有断言退化。
+
+评测只检查给定 baseline/candidate 工件，不自动运行抽取模型，不证明因果改善或全面业务正确；当前尚无真实效果验证。发布、撤回仍由人工 CLI 执行，agent 不能自填确认人或批准经验。正常抽取提交无需逐篇等待人工审批。
 
 每篇任务注册时冻结已发布集合，召回默认最多三条、约 6 KiB。检索在本地执行，不调用辅助模型，但仍占用主 agent 的工具交互轮次和上下文。撤回影响之后注册的任务；已有任务保留原快照。操作命令、数据格式和权限边界见 [经验记忆说明](.opencode/skills/term-extract/references/experience.md)及[回归清单](.opencode/skills/term-extract/references/memory-evaluation.md)。
 

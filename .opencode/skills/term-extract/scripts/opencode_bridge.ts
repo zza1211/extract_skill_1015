@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -20,6 +21,19 @@ export function projectRoot(directory: string): string {
 
 export function resolveFile(root: string, file: string): string {
   return path.resolve(root, file);
+}
+
+export async function withJsonFile<T>(value: unknown, action: (file: string) => Promise<T>): Promise<T> {
+  // 完整结果可能超过 Windows 的命令行长度限制，用临时 JSON 文件交给 Python。
+  const directory = await mkdtemp(path.join(os.tmpdir(), "term-extract-input-"));
+  const file = path.join(directory, "payload.json");
+  try {
+    await writeFile(file, JSON.stringify(value) + "\n", "utf8");
+    return await action(file);
+  } finally {
+    await unlink(file).catch(error => { if (error.code !== "ENOENT") throw error; });
+    await rmdir(directory);
+  }
 }
 
 export async function digest(file: string): Promise<string> {

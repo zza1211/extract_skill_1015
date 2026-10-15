@@ -24,6 +24,7 @@ NOTICE = (
     "不证明已运行任何模型，也不等于全面语义准确率。confirmed_by/scope_note 是人工标注声明，"
     "CLI 不认证身份或自动判定规则适用语义。真正生成两组输出由外部运行器负责。"
     "绑定的是评测时当前源码/config 哈希，不证明这些配置曾用于生成给定输出；运行来源仍需维护人确认。"
+    "成功来源模式只检查对已确认成功经验的断言兼容，不证明性能收益。"
 )
 
 
@@ -253,8 +254,97 @@ def _evaluate_assertion(assertion: dict, order: dict[str, int], records: list[di
             "general_clause_ids": sorted(generals), "errors": errors}
 
 
+def _development_sources(project_root: Path, payload: dict, store: Any, learning: Any,
+                         artifacts: Artifacts) -> tuple[list[dict], list[dict]]:
+    """Normalize confirmed sources while preserving the legacy correction API."""
+    corrections, source_ids = payload.get("correction_ids"), payload.get("source_ids", [])
+    for values, name in ((corrections, "correction_ids"), (source_ids, "source_ids")):
+        if not isinstance(values, list) or any(not isinstance(item, str) or not item.strip()
+                                              or item != item.strip() for item in values):
+            raise EvaluationError(f"candidate.{name} 必须是不含空白编号的字符串数组。")
+        if len(set(values)) != len(values):
+            raise EvaluationError(f"candidate.{name} 不能重复。")
+    if not corrections and not source_ids:
+        raise EvaluationError("candidate 必须有 correction_ids 或已确认 source_ids 来源。")
+    if source_ids:
+        module = learning if learning is not None else importlib.import_module("memory_learning")
+        if getattr(module, "__file__", None):
+            artifacts.read(Path(module.__file__))
+        sources = module.evaluation_sources(project_root, payload)
+        if not isinstance(sources, list) or not sources:
+            raise EvaluationError("已确认评测来源必须是非空数组。")
+    else:
+        sources = []
+        for cid in corrections:
+            correction = store.get_correction(project_root, cid)
+            if not isinstance(correction, dict):
+                raise EvaluationError(f"纠错记录 {cid} 不合法。")
+            sources.append({**correction, "source_id": cid, "kind": "correction", "correction_id": cid})
+    normalized, confirmations, seen, seen_corrections = [], [], set(), set()
+    for source in sources:
+        if not isinstance(source, dict):
+            raise EvaluationError("评测来源必须是对象。")
+        sid = _identifier(source.get("source_id"), "source.source_id")
+        if sid in seen:
+            raise EvaluationError(f"评测来源编号重复：{sid}")
+        seen.add(sid)
+        kind = source.get("kind")
+        if kind not in ("correction", "success"):
+            raise EvaluationError("source.kind 必须为 correction/success。")
+        family = _identifier(source.get("family_id"), "source.family_id")
+        source_sha = _hash(source.get("source_sha256"), "source.source_sha256")
+        binding = {"source_id": sid, "kind": kind, "family_id": family, "source_sha256": source_sha}
+        cid = source.get("correction_id")
+        if cid is not None and cid in corrections:
+            seen_corrections.add(cid)
+        if sid in source_ids:
+            confirmation = source.get("confirmation")
+            if source.get("confirmed") is not True or not isinstance(confirmation, dict):
+                raise EvaluationError(f"来源 {sid} 尚无有效人工确认记录。")
+            _text(confirmation.get("confirmed_by"), "source.confirmation.confirmed_by")
+            _text(confirmation.get("note"), "source.confirmation.note")
+            if confirmation.get("family_id") != family:
+                raise EvaluationError(f"来源 {sid} 的确认 family 与来源不一致。")
+            confirmation_sha = _hash(source.get("confirmation_sha256"), "source.confirmation_sha256")
+            actual_sha = hashlib.sha256(json.dumps(confirmation, ensure_ascii=False, sort_keys=True,
+                                                   separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+            if confirmation_sha != actual_sha:
+                raise EvaluationError(f"来源 {sid} 的人工确认记录哈希不一致。")
+            confirmations.append({"source_id": sid, "confirmation_sha256": confirmation_sha})
+            binding["confirmation_sha256"] = confirmation_sha
+        elif cid not in corrections or kind != "correction":
+            raise EvaluationError(f"来源 {sid} 不属于候选 source_ids/correction_ids。")
+        source_artifacts = source.get("artifacts", [])
+        if not isinstance(source_artifacts, list) or (sid in source_ids and not source_artifacts):
+            raise EvaluationError(f"来源 {sid} 必须绑定不可变工件。")
+        for item in source_artifacts:
+            _fields(item, {"path", "sha256"}, set(), "source.artifacts[]")
+            path = _path(project_root, item["path"], "source.artifacts[].path")
+            expected = _hash(item["sha256"], "source.artifacts[].sha256")
+            if hashlib.sha256(artifacts.read(path)).hexdigest() != expected:
+                raise EvaluationError(f"来源不可变工件已变化：{path}")
+        input_name = source.get("input_path")
+        if input_name is not None:
+            input_path = _path(project_root, input_name, "source.input_path")
+            if (sid in source_ids or input_path.exists()) and hashlib.sha256(artifacts.read(input_path)).hexdigest() != source_sha:
+                raise EvaluationError(f"开发来源输入已变化：{input_path}，请重新确认来源。")
+        elif sid in source_ids:
+            raise EvaluationError(f"来源 {sid} 缺少 input_path。")
+        if kind == "success":
+            result_path = _path(project_root, source.get("result_path"), "source.result_path")
+            result_sha = _hash(source.get("result_sha256"), "source.result_sha256")
+            if hashlib.sha256(artifacts.read(result_path)).hexdigest() != result_sha:
+                raise EvaluationError(f"成功来源输出已变化：{result_path}")
+            binding["result_path"] = str(result_path)
+            binding["result_sha256"] = result_sha
+        normalized.append(binding)
+    if seen_corrections != set(corrections) or {item["source_id"] for item in confirmations} != set(source_ids):
+        raise EvaluationError("评测来源未精确覆盖候选 correction_ids/source_ids。")
+    return sorted(normalized, key=lambda item: item["source_id"]), sorted(confirmations, key=lambda item: item["source_id"])
+
+
 def evaluate_manifest(project_root: Path, memory_id: str, revision: int, manifest_path: Path,
-                      *, store: Any = None) -> dict[str, Any]:
+                      *, store: Any = None, learning: Any = None) -> dict[str, Any]:
     memory_id = _identifier(memory_id, "memory_id")
     if type(revision) is not int or revision < 1:
         raise EvaluationError("revision 必须是正整数，不能是布尔值。")
@@ -267,11 +357,6 @@ def evaluate_manifest(project_root: Path, memory_id: str, revision: int, manifes
     if candidate.get("memory_id") != memory_id or type(candidate.get("revision")) is not int or candidate["revision"] != revision:
         raise EvaluationError("加载的候选 identity 与请求不一致。")
     base_release = _hash(store.release_digest(project_root), "base_release_sha256")
-    corrections = candidate["payload"].get("correction_ids")
-    if not isinstance(corrections, list) or not corrections:
-        raise EvaluationError("candidate.correction_ids 必须是非空数组。")
-    if any(not isinstance(cid, str) or not cid.strip() for cid in corrections) or len(set(corrections)) != len(corrections):
-        raise EvaluationError("candidate.correction_ids 必须是互不重复的非空字符串。")
     artifacts = Artifacts()
     for module in (sys.modules[__name__], document_io, result_validator):
         artifacts.read(Path(module.__file__))
@@ -279,25 +364,17 @@ def evaluate_manifest(project_root: Path, memory_id: str, revision: int, manifes
                      ".opencode/skills/term-extract/references/business-rules.md",
                      ".opencode/agents/term-extractor.md", "opencode.json",
                      ".opencode/tools/term_memory.ts",
-                     ".opencode/skills/term-extract/scripts/commit_result.py"):
+                     ".opencode/skills/term-extract/scripts/commit_result.py",
+                     ".opencode/skills/term-extract/scripts/memory_learning.py"):
         path = project_root / relative
         if path.exists():
             artifacts.read(path)
-    correction_pairs, development_families, development_sources = set(), set(), set()
-    for cid in corrections:
-        correction = store.get_correction(project_root, cid)
-        if not isinstance(correction, dict):
-            raise EvaluationError(f"纠错记录 {cid} 不合法。")
-        family = _identifier(correction.get("family_id"), "correction.family_id")
-        source_sha = _hash(correction.get("source_sha256"), "correction.source_sha256")
-        correction_pairs.add((family, source_sha))
-        development_families.add(family)
-        development_sources.add(source_sha)
-        source = correction.get("input_path")
-        if source is not None:
-            source_path = _path(project_root, source, "correction.input_path")
-            if source_path.exists() and hashlib.sha256(artifacts.read(source_path)).hexdigest() != source_sha:
-                raise EvaluationError(f"开发纠错输入已变化：{source_path}，请重新导入纠错。")
+    sources, source_confirmations = _development_sources(project_root, candidate["payload"], store, learning, artifacts)
+    correction_pairs = {(item["family_id"], item["source_sha256"]) for item in sources if item["kind"] == "correction"}
+    success_pairs = {(item["family_id"], item["source_sha256"]) for item in sources if item["kind"] == "success"}
+    development_families = {item["family_id"] for item in sources}
+    development_sources = {item["source_sha256"] for item in sources}
+    evaluation_mode = "correction" if correction_pairs else "success"
     manifest = artifacts.json(manifest_path)
     _fields(manifest, {"schema_version", "cases"}, set(), "manifest")
     if type(manifest["schema_version"]) is not int or manifest["schema_version"] != VERSION:
@@ -318,12 +395,12 @@ def evaluate_manifest(project_root: Path, memory_id: str, revision: int, manifes
             raise EvaluationError(f"case_id 重复：{case_id}")
         case_ids.add(case_id)
         role, split = case["role"], case["split"]
-        if not isinstance(role, str) or role not in ("fix", "regression", "counterexample"):
+        if not isinstance(role, str) or role not in ("fix", "success", "regression", "counterexample"):
             raise EvaluationError(f"{prefix}.role 不合法。")
         if not isinstance(split, str) or split not in ("development", "regression"):
             raise EvaluationError(f"{prefix}.split 只接受 development/regression；禁止 final/holdout。")
-        if (role == "fix" and split != "development") or (role != "fix" and split != "regression"):
-            raise EvaluationError(f"{prefix} 的 fix 必须属于 development，其他角色必须属于 regression。")
+        if (role in ("fix", "success") and split != "development") or (role not in ("fix", "success") and split != "regression"):
+            raise EvaluationError(f"{prefix} 的 fix/success 必须属于 development，其他角色必须属于 regression。")
         if "scope_note" in case:
             _text(case["scope_note"], prefix + ".scope_note")
         if role == "counterexample":
@@ -339,8 +416,10 @@ def evaluate_manifest(project_root: Path, memory_id: str, revision: int, manifes
         family_splits[family] = split
         independent = family not in development_families and source_sha not in development_sources
         if role == "fix" and (family, source_sha) not in correction_pairs:
-            raise EvaluationError(f"fix {case_id} 的 family/source 未被此 candidate.correction_ids 绑定。")
-        if role != "fix" and not independent:
+            raise EvaluationError(f"fix {case_id} 的 family/source 未被此候选的已确认纠错来源绑定。")
+        if role == "success" and (family, source_sha) not in success_pairs:
+            raise EvaluationError(f"success {case_id} 的 family/source 未被此候选的已确认成功来源绑定。")
+        if role not in ("fix", "success") and not independent:
             raise EvaluationError(f"{case_id} 与开发纠错 family/source 不独立。")
         assertions = _assertions(case["assertions"], order, prefix + ".assertions")
         if role == "counterexample" and not any(item["forbidden_tags"] or "clause_category" in item for item in assertions):
@@ -348,6 +427,14 @@ def evaluate_manifest(project_root: Path, memory_id: str, revision: int, manifes
         result_paths = {side: _path(manifest_path.parent, case[f"{side}_result_path"], prefix + f".{side}_result_path")
                         for side in ("baseline", "candidate")}
         results = {side: artifacts.json(path) for side, path in result_paths.items()}
+        success_source = None
+        if role == "success":
+            matching = [item for item in sources if item["kind"] == "success"
+                        and (item["family_id"], item["source_sha256"]) == (family, source_sha)]
+            success_source = next((item for item in matching
+                                   if artifacts.json(Path(item["result_path"])) == results["baseline"]), None)
+            if success_source is None:
+                raise EvaluationError(f"success {case_id} 的 baseline 必须与对应来源已确认的结果快照一致。")
         validations = {side: result_validator.validate_result(index, value) for side, value in results.items()}
         for side, validation in validations.items():
             if validation["ok"] is not True:
@@ -359,26 +446,35 @@ def evaluate_manifest(project_root: Path, memory_id: str, revision: int, manifes
             evaluated.append({"assertion_index": assertion_no, **assertion, "baseline": before, "candidate": after,
                               "regressed": before["passed"] and not after["passed"],
                               "improved": validations["baseline"]["ok"] and not before["passed"] and after["passed"]})
-        reports.append({"case_id": case_id, "family_id": family, "role": role, "split": split,
+        case_report = {"case_id": case_id, "family_id": family, "role": role, "split": split,
                         "confirmed_by": case["confirmed_by"], "scope_note": case.get("scope_note"),
                         "source_sha256": source_sha, "original_source_verified": source_available,
                         "independent_of_development": independent, "index_path": str(index_path),
                         "baseline_result_path": str(result_paths["baseline"]), "candidate_result_path": str(result_paths["candidate"]),
                         "baseline_validation": validations["baseline"], "candidate_validation": validations["candidate"],
                         "baseline_passed": all(a["baseline"]["passed"] for a in evaluated),
-                        "candidate_passed": all(a["candidate"]["passed"] for a in evaluated), "assertions": evaluated})
+                        "candidate_passed": all(a["candidate"]["passed"] for a in evaluated), "assertions": evaluated}
+        if success_source is not None:
+            case_report.update(success_source_id=success_source["source_id"],
+                               success_result_sha256=success_source["result_sha256"])
+        reports.append(case_report)
     summary = {
         "fix_improvements": sum(c["role"] == "fix" and c["baseline_validation"]["ok"]
                                 and not c["baseline_passed"] and c["candidate_passed"] for c in reports),
+        "success_cases": sum(c["role"] == "success" and c["baseline_passed"] and c["candidate_passed"] for c in reports),
         "regressions": sum(a["regressed"] for c in reports for a in c["assertions"]),
-        "independent_regression_cases": sum(c["role"] != "fix" and c["independent_of_development"]
+        "independent_regression_cases": sum(c["role"] not in ("fix", "success") and c["independent_of_development"]
                                             and c["baseline_passed"] and c["candidate_passed"] for c in reports),
         "counterexample_cases": sum(c["role"] == "counterexample" and c["independent_of_development"]
                                     and c["baseline_passed"] and c["candidate_passed"] for c in reports),
-        "unfixed_target_cases": sum(c["role"] == "fix" and not c["candidate_passed"] for c in reports),
+        "unfixed_target_cases": sum(c["role"] in ("fix", "success") and not c["candidate_passed"] for c in reports),
     }
     gates = list(structural_failures)
-    conditions = [(summary["fix_improvements"] >= 1, "NO_FIX_IMPROVEMENT"),
+    gates.extend({"code": "SUCCESS_BASELINE_FAILED", "case_id": c["case_id"]}
+                 for c in reports if c["role"] == "success" and not c["baseline_passed"])
+    target_condition = ((summary["fix_improvements"] >= 1, "NO_FIX_IMPROVEMENT") if evaluation_mode == "correction"
+                        else (summary["success_cases"] >= 1, "NO_PASSING_SUCCESS_CASE"))
+    conditions = [target_condition,
                   (summary["regressions"] == 0, "REGRESSION_FOUND"),
                   (summary["independent_regression_cases"] >= 1, "NO_PASSING_INDEPENDENT_REGRESSION"),
                   (summary["counterexample_cases"] >= 1, "NO_PASSING_COUNTEREXAMPLE"),
@@ -388,8 +484,12 @@ def evaluate_manifest(project_root: Path, memory_id: str, revision: int, manifes
     current = store.load_candidate(project_root, memory_id, revision)
     if current.get("content_sha256") != candidate_sha or store.release_digest(project_root) != base_release:
         raise EvaluationError("评测期间候选内容或已发布基线发生变化，请重新评测。")
+    current_sources, current_confirmations = _development_sources(project_root, candidate["payload"], store, learning, artifacts)
+    if current_sources != sources or current_confirmations != source_confirmations:
+        raise EvaluationError("评测期间来源或人工确认发生变化，请重新评测。")
     artifacts.verify()
     report = {"candidate": {"memory_id": memory_id, "revision": revision, "content_sha256": candidate_sha},
+              "evaluation_mode": evaluation_mode, "source_confirmations": source_confirmations,
               "base_release_sha256": base_release, "status": "failed" if gates else "passed", "summary": summary,
               "cases": reports, "artifacts": artifacts.list(), "gate_errors": gates,
               "evaluator": {"version": VERSION, "mode": "offline_assertions_only"}, "notice": NOTICE}

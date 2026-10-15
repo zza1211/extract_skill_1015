@@ -43,7 +43,7 @@ def codes(report: dict, key: str = "errors") -> set[str]:
 
 
 def wifi_layout_fixture() -> dict:
-    # HK-M01 首表：AP 与 AC 在同一描述 cell；后两行是 Wi-Fi 性能要求。
+    # 合成表格布局：AP 与 AC 在同一描述 cell；后两行是系统性能要求。
     return {
         "schema_version": 2,
         "demo": False,

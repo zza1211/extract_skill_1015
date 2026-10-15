@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import * as documents from "../.opencode/tools/term_document.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const sourceDirectory = path.resolve(root, process.argv[2] || "../structured_json");
+assert.ok(process.argv[2], "用法：node tests/structured_json_smoke.mjs <带标签 JSON 目录>");
+const sourceDirectory = path.resolve(root, process.argv[2]);
 const temporary = await mkdtemp(path.join(os.tmpdir(), "term-extract-structured-"));
 const context = { directory: root };
 const filenames = (await readdir(sourceDirectory)).filter(name => name.endsWith(".json")).sort();

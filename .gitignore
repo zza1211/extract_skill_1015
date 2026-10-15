@@ -1,7 +1,7 @@
 /runs/
 /structured_json/
 /example/
-/reports/*.jsonl
+/reports/
 __pycache__/
 *.pyc
 node_modules/

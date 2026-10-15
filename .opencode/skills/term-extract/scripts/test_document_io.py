@@ -65,8 +65,22 @@ class DocumentIOTests(unittest.TestCase):
             result[unit_id] = text
         return result
 
-    def test_real_example_cross_table_and_demo_only(self):
-        example = Path(__file__).resolve().parents[5] / "example" / "input_data.json"
+    def test_cross_table_fixture_and_demo_only(self):
+        example = self.root / "untagged.json"
+        source = [
+            {"text": "设备技术规格"},
+            {"table": {
+                "rows": [["序号", "设备", "参数", "数量", "备注"],
+                         ["1", "设备一", "参数甲", "2", ""]],
+                "merges": [{"id": "M1", "value": "设备与参数",
+                            "top_left": {"row": 0, "col": 1},
+                            "row_span": 1, "col_span": 2}],
+            }},
+            {"text": "续表"},
+            {"table": {"rows": [["2", "设备二", "参数乙"],
+                                 ["3", "设备三", "参数丙"]], "merges": []}},
+        ]
+        example.write_bytes(doc.json_bytes(source))
         raw = example.read_bytes()
         with self.assertRaisesRegex(doc.DocumentError, "缺少"):
             doc.prepare(example, self.root / "production")
@@ -75,15 +89,15 @@ class DocumentIOTests(unittest.TestCase):
         index, _ = doc.load_index(Path(result["index_path"]))
         self.assertTrue(index["demo"])
         self.assertFalse(index["production_submittable"])
-        self.assertEqual([len(t["rows"]) for t in index["tables"]], [39, 27])
+        self.assertEqual([len(t["rows"]) for t in index["tables"]], [2, 2])
         original = json.loads(raw)
         self.assertEqual(index["source_document"], original)
         self.assertEqual(index["tables"][0]["merges"], original[1]["table"]["merges"])
         cells = [u for u in index["units"] if u["kind"] == "cell"]
         self.assertEqual([(u["row"], u["col"]) for u in cells[:5]], [(0, n) for n in range(5)])
         second = [u for u in cells if u["block_index"] == 3]
-        self.assertEqual(second[0]["source_text"], "38")
-        self.assertEqual(second[-3]["source_text"], "64")
+        self.assertEqual(second[0]["source_text"], "2")
+        self.assertEqual(second[-3]["source_text"], "3")
         seen = self.reconstructed(self.collect(Path(result["index_path"])))
         self.assertEqual(seen, {u["unit_id"]: u["source_text"] for u in index["units"]})
         manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
@@ -358,10 +372,11 @@ class DocumentIOTests(unittest.TestCase):
             self.assertGreater(len(capped), 2)
             self.assertEqual(self.reconstructed(capped), {u["unit_id"]: u["source_text"] for u in index["units"]})
 
-    def test_real_hk_compact_is_one_page_with_full_original_coverage(self):
-        path = Path(__file__).resolve().parents[4] / "runs" / "HK-M01_2025_BHSCMC" / "index.json"
-        if not path.exists():
-            self.skipTest("本机未提供真实 HK 回放索引")
+    def test_compact_table_is_one_page_with_full_original_coverage(self):
+        rows = [["\n".join(f"<C{row * 6 + part + 1}>设备规格" for part in range(6))]
+                for row in range(50)]
+        result = self.prepare([{"table": {"rows": rows, "merges": []}}])
+        path = Path(result["index_path"])
         index, _ = doc.load_index(path)
         pages = self.collect(path, view="compact")
         self.assertEqual(len(pages), 1)

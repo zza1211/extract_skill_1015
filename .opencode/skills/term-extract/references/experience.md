@@ -1,10 +1,10 @@
 # 经验库维护约定（0.1.0）
 
-`business-rules.md` 是已确认口径，demo 与模型自己生成的结果不能冒充人工案例。目前有一条用户确认的纠错记录；它不是独立测试集上的质量成绩。
+`business-rules.md` 是已确认口径，demo 与模型自己生成的结果不能冒充人工案例。仓库只维护可复用的处理原则；原始输入、预测、修订及运行记录应保存在单独的案例数据集中。
 
 ## 案例索引
 
-- [E001：连续表格行不因标签切分而成为 separate](cases/E001-table-continuity.md)。错误类型为条款边界/关联；在同一表格相邻行、同格多标签或续表场景出现分散判断疑点时加载。用户已确认本例的 separate 判断错误；系统性能归属的建议需要原文取证，不作为无条件映射。
+- [E001：连续表格行不因标签切分而成为 separate](cases/E001-table-continuity.md)。错误类型为条款边界/关联；在同一表格相邻行、同格多标签或续表场景出现分散判断疑点时加载。文件为通用处理原则，不包含真实标书或运行输出；系统性能归属需要原文取证，不作为无条件映射。
 
 OpenCode 读取 E001 的工作区相对完整路径为 `.opencode/skills/term-extract/references/cases/E001-table-continuity.md`。Markdown 链接相对于本 experience.md 所在目录解析；不要把它误定位到技能根目录的 cases 文件夹。
 

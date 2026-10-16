@@ -1,6 +1,6 @@
 # 经验记忆技术方案与完整数据流
 
-本文对应 **0.3.0**，说明当前实际实现、数据流和人工边界。操作参数见 [经验维护说明](../.opencode/skills/term-extract/references/experience.md)，断言格式见 [回归清单](../.opencode/skills/term-extract/references/memory-evaluation.md)。文中编号和目录均为结构示意，仓库不附带案例、私有数据库或运行结果。
+本文对应 **0.4.0**，说明当前实际实现、数据流和人工边界。页面操作见 [本地记忆工作台](memory-dashboard.md)，CLI 参数见 [经验维护说明](../.opencode/skills/term-extract/references/experience.md)，断言格式见 [回归清单](../.opencode/skills/term-extract/references/memory-evaluation.md)。文中编号和目录均为结构示意，仓库不附带案例、私有数据库或运行结果。
 
 当前机制是：主 agent 在正式提交时主动复盘，工具保存不可变运行、用户反馈和候选规则；人工确认来源，离线评测与人工发布后，后续新任务才按需召回规则。模型参数不更新，没有后台监听会话，也不另调模型分析聊天。新会话能用旧经验，是因为工具重新交付持久化规则。
 
@@ -23,7 +23,7 @@ flowchart TD
     G --> I
     I --> J["外部准备两组输出与人工关键参数断言"]
     J --> K["离线评测：自动判断 success / correction 模式"]
-    K --> L["维护者审阅并执行 publish CLI"]
+    K --> L["维护者审阅，在工作台或 CLI 发布"]
     L --> M["第二篇新任务：固定新发布集合，按疑点召回"]
 ```
 
@@ -254,7 +254,7 @@ anchor_tag 必须位于唯一 normal/separate 记录自身范围；零匹配是�
 
 ## 7. 发布、修订和撤回
 
-publish 仅为人工 CLI。事务核对候选、数据库内部评测报告、当前 release、所有来源确认和外部工件；报告须通过且未使用。通过后追加 audit、记录 used_evaluations 并切换 active。报告绑定的集合或文件变化就要重新评测，不允许复用外部伪造报告绕过内部记录。
+publish 由维护者在本地工作台或 CLI 执行。事务核对候选、数据库内部评测报告、当前 release、所有来源确认和外部工件；报告须通过且未使用。通过后追加 audit、记录 used_evaluations 并切换 active。报告绑定的集合或文件变化就要重新评测，不允许复用外部伪造报告绕过内部记录。
 
 | 动作 | 内容与当前发布状态 | 新任务 |
 |---|---|---|
@@ -268,7 +268,7 @@ list 的 state 描述最新修订，active_revision 描述当前发布版，因�
 
 ## 8. 工具权限与人工边界
 
-| 动作 | extractor | curator | 维护者 CLI |
+| 动作 | extractor | curator | 维护者工作台 / CLI |
 |---|---|---|---|
 | 按任务快照 recall | 允许 | 未开放 | 可诊断 |
 | feedback / reflect | 两者允许 | 仅 reflect | 允许 |
@@ -292,7 +292,25 @@ list 的 state 描述最新修订，active_revision 描述当前发布版，因�
 | 自动判断全面业务正确、经验因果收益 | 未实现，当前尚无真实效果验证 |
 | 向量/跨语言语义召回、规则冲突自动检测 | 未实现，当前为词语排序与主 agent 判断 |
 | 按模型隔离经验、跨模型效果保证 | 未实现；同库共用发布集合，可人为外置不同库 |
-| 多用户认证与审批工作台 | 未实现，当前为本地 CLI 与 agent 权限隔离 |
+| 本地可视化工作台 | 已实现；读取同一私有库，可确认、修订、评测、发布和撤回 |
+| 多用户认证 | 未实现；仅监听本机，审核姓名是审计信息 |
+
+### 9.1 工作台的数据流
+
+```mermaid
+flowchart LR
+    A["浏览器：本地中文工作台"] --> B["memory_ui：静态页面与本机 HTTP 接口"]
+    B --> C["memory_dashboard：列表、来源、差异和门槛说明"]
+    C --> D["memory_learning / memory_store / memory_evaluate"]
+    D --> E["同一 SQLite、归档与外部工件"]
+    F["Git 中的 business-rules.md"] --> C
+    D --> G["发布集合 active"]
+    G --> H["后续新任务 prepare 固定快照"]
+```
+
+工作台无需 OpenCode 会话或额外模型调用。浏览查询不会创建空数据库；编辑规则创建新修订，完善反馈创建新的带稿反馈，不覆盖旧记录。读取正文和列出门槛只是辅助维护者判断；确认、评测、发布继续调用原有实现，不把按钮点击当成业务正确证明。
+
+页面显示的是数据库中的真实状态。固定业务口径从技能文件读取，差异来自本地 Git 历史，不伪装成已发布经验。历史运行的口径摘要与当前文件不同只提示版本变化，不自动判断其结果错误，也不会重新计算旧快照。详情与操作步骤见 [工作台说明](memory-dashboard.md)。
 
 ## 10. 代码阅读索引
 
@@ -301,6 +319,9 @@ list 的 state 描述最新修订，active_revision 描述当前发布版，因�
 | [memory_learning.py](../.opencode/skills/term-extract/scripts/memory_learning.py) | register_run、validate_reflection、record_feedback、来源与人工确认 |
 | [memory_store.py](../.opencode/skills/term-extract/scripts/memory_store.py) | 表结构、修订/发布、create_snapshot、recall、run_memory_record |
 | [memory_evaluate.py](../.opencode/skills/term-extract/scripts/memory_evaluate.py) | 来源推导、success 基线绑定、断言、门槛与工件哈希 |
+| [memory_dashboard.py](../.opencode/skills/term-extract/scripts/memory_dashboard.py) | 只读汇总、来源与差异、门槛说明、复用原维护动作 |
+| [memory_ui.py](../.opencode/skills/term-extract/scripts/memory_ui.py) | 本机 HTTP 服务、静态页面、请求校验与只读模式 |
+| [web/memory](../web/memory/) | 中文工作台界面，无额外前端依赖 |
 | [term_memory.ts](../.opencode/tools/term_memory.ts) | 召回预算与回执、feedback/source/reflect、维护工具 |
 | [term_result.ts](../.opencode/tools/term_result.ts) | 必填 reflection_json 与正式提交入口 |
 | [term_document.ts](../.opencode/tools/term_document.ts) | 注册时固定快照，拒绝覆盖旧任务 |

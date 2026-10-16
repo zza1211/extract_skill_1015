@@ -1,6 +1,6 @@
 """本地经验库：不可变修订、人工发布、冻结任务快照和交付回执。
 
-人工身份来自操作权限与人工 CLI 流程；reviewer/confirmed_by 是审计记录，
+人工身份来自操作权限与人工维护流程；reviewer/confirmed_by 是审计记录，
 不是身份认证。SQLite 与快照哈希用于一致性检查，不是抵抗本机管理员篡改的签名。
 """
 from __future__ import annotations
@@ -425,13 +425,15 @@ def publish(root: Path, memory_id, revision, evaluation_id, reviewer: str, note:
     return {"memory_id": memory_id, "revision": revision, "state": "published", "content_sha256": candidate["content_sha256"], "evaluation_id": evaluation_id, "report_sha256": evaluation["report_sha256"], "release_sha256": digest, "event_id": event_id}
 
 
-def withdraw(root: Path, memory_id, reviewer: str, note: str) -> dict:
+def withdraw(root: Path, memory_id, reviewer: str, note: str, expected_revision=None) -> dict:
     reviewer, note = _string(reviewer, "reviewer（人工审阅者审计名）", 160), _string(note, "撤回说明", 2000)
     memory_id = _string(memory_id, "memory_id", 128)
     with _db(root, write=True) as connection:
         row = connection.execute("SELECT revision FROM active WHERE memory_id=?", (_string(memory_id, "memory_id", 128),)).fetchone()
         if row is None:
             raise MemoryError("该经验没有当前已发布修订。")
+        if expected_revision is not None and row["revision"] != _integer(expected_revision, "expected_revision"):
+            raise MemoryError("活动修订已变化，请刷新页面后再撤回。")
         candidate = _candidate(connection, memory_id, row["revision"])
         event_id = _audit(connection, memory_id, row["revision"], "withdraw", reviewer, note, {"content_sha256": candidate["content_sha256"]})
         connection.execute("DELETE FROM active WHERE memory_id=?", (memory_id,))

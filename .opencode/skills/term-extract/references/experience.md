@@ -1,4 +1,6 @@
-# 经验复盘、反馈与发布（0.3.0）
+# 经验复盘、反馈与发布（0.4.0）
+
+维护者可以使用[本地记忆工作台](../../../../docs/memory-dashboard.md)查看正文、来源、修订与未生效原因，并执行人工确认、离线评测、发布或撤回。下文 CLI 与页面操作共用原有存储和校验门槛；页面不是另一套记忆，也不自动生成实验输出。
 
 业务口径仍由 `business-rules.md` 定义。经验提醒判断边界与核验动作，不保存其他标书的固定答案，不覆盖当前原文。仓库不附带案例或记忆数据库。技术原理、表结构和完整数据流见 [技术方案](../../../../docs/memory-architecture.md)。
 
@@ -71,7 +73,7 @@
 
 使用 Python 标准库 SQLite，默认 `.term-memory/`，已被 Git 忽略；可用 `TERM_EXTRACT_MEMORY_DIR` 外置。运行、反馈、复盘、确认、经验修订与评测保存在私有库，结果/证据/run 和反馈修正稿另存内容地址归档。原始输入与 index 保留路径和哈希，不复制到归档；后续读取、确认、评测与发布仍需它们可用且未变。自定义目录若在仓库内，须自行忽略。
 
-来源确认与经验发布是两个动作：确认这篇运行正确，或确认某份反馈修正稿，不代表认可它归纳出的所有规则。维护者通过 CLI 操作，名字仅是审计记录，不是身份认证：
+来源确认与经验发布是两个动作：确认这篇运行正确，或确认某份反馈修正稿，不代表认可它归纳出的所有规则。维护者通过工作台或 CLI 操作，名字仅是审计记录，不是身份认证；以下是对应 CLI：
 
 ```powershell
 $learningScript = '.opencode/skills/term-extract/scripts/memory_learning.py'
@@ -136,7 +138,7 @@ success 开发案例的输入哈希与家族匹配已确认成功来源；fix �
 python -X utf8 .opencode/skills/term-extract/scripts/memory_evaluate.py --project-root . --memory-id '经验编号' --revision 1 --manifest 'D:\私有数据\regression.json'
 ```
 
-curator 也可调用 `term_memory_evaluate`。报告绑定规则、当前发布集合、来源确认和评测工件。维护者核对内容、来源、输出生成方式与边界后，才执行发布 CLI：
+curator 也可调用 `term_memory_evaluate`。报告绑定规则、当前发布集合、来源确认和评测工件。维护者核对内容、来源、输出生成方式与边界后，在工作台发布，或执行对应 CLI：
 
 ```powershell
 python -X utf8 $memoryScript --project-root . show --memory-id '经验编号' --revision 1

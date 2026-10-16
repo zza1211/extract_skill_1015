@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>经验工作台 · 条款抽取</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="工作台导航">
+        <a class="brand" href="/" aria-label="条款抽取经验工作台首页">
+          <span class="brand-mark" aria-hidden="true">t<span>e</span></span>
+          <span><strong>条款抽取</strong><small>经验工作台</small></span>
+        </a>
+        <div class="nav-caption">工作空间</div>
+        <nav class="main-nav">
+          <button
+            type="button"
+            class="nav-item active"
+            data-section="memories"
+            aria-current="page"
+          >
+            <span class="nav-icon" aria-hidden="true">▦</span>经验库<span
+              id="nav-memory-count"
+              class="nav-count"
+              >—</span
+            >
+          </button>
+          <button type="button" class="nav-item" data-section="runs">
+            <span class="nav-icon" aria-hidden="true">◷</span>运行与反馈
+          </button>
+          <button type="button" class="nav-item" data-section="policy">
+            <span class="nav-icon" aria-hidden="true">≡</span>固定业务口径
+          </button>
+          <button type="button" class="nav-item" data-section="history">
+            <span class="nav-icon" aria-hidden="true">↗</span>更新历史
+          </button>
+        </nav>
+        <div class="sidebar-guide">
+          <span class="guide-symbol" aria-hidden="true">✦</span>
+          <strong>让判断有据可循</strong>
+          <p>本篇观察先留为候选，核验来源、评测后再决定是否发布。</p>
+          <div class="mini-flow">
+            <span>观察</span><i>→</i><span>核验</span><i>→</i><span>发布</span>
+          </div>
+        </div>
+        <footer class="sidebar-footer">
+          <span id="connection-dot" class="connection-dot"></span
+          ><span id="connection-label">正在连接本地服务</span
+          ><small>本地维护 · 0.4.0</small>
+        </footer>
+      </aside>
+      <main id="main-content" class="main-content">
+        <header class="page-header">
+          <div>
+            <div class="eyebrow">TERM EXTRACT / MEMORY</div>
+            <h1 id="page-title">经验库</h1>
+            <p id="page-description">
+              查看候选、核验来源，让经验在发布后用于下一篇。
+            </p>
+          </div>
+          <div class="header-actions">
+            <span id="access-mode" class="access-mode">本地连接中</span
+            ><button type="button" id="refresh-button" class="button secondary">
+              <span aria-hidden="true">↻</span> 刷新
+            </button>
+          </div>
+        </header>
+        <section class="stats-grid" aria-label="经验库概况">
+          <button type="button" class="stat-card" data-stat="published">
+            <span class="stat-label"
+              ><span class="stat-symbol green" aria-hidden="true">✓</span
+              >已发布经验</span
+            ><strong id="count-published">—</strong
+            ><span class="stat-note">可供新任务按需召回</span>
+          </button>
+          <button type="button" class="stat-card" data-stat="candidate">
+            <span class="stat-label"
+              ><span class="stat-symbol orange" aria-hidden="true">◇</span
+              >候选经验</span
+            ><strong id="count-candidate">—</strong
+            ><span class="stat-note">保存不等于已经生效</span>
+          </button>
+          <button type="button" class="stat-card" data-stat="feedback">
+            <span class="stat-label"
+              ><span class="stat-symbol purple" aria-hidden="true">☷</span
+              >待处理反馈</span
+            ><strong id="count-feedback">—</strong
+            ><span class="stat-note">补齐修正稿后人工核验</span>
+          </button>
+          <button type="button" class="stat-card" data-stat="runs">
+            <span class="stat-label"
+              ><span class="stat-symbol blue" aria-hidden="true">↗</span
+              >抽取运行</span
+            ><strong id="count-runs">—</strong
+            ><span class="stat-note">保留原结果与提交依据</span>
+          </button>
+        </section>
+        <div id="overview-notice" class="overview-notice" role="status">
+          <span class="notice-icon" aria-hidden="true">i</span>
+          <div>
+            <strong>正在读取真实记录</strong>
+            <p>连接成功后展示当前经验、来源与发布状态。</p>
+          </div>
+        </div>
+        <div id="policy-alert" class="policy-alert" hidden></div>
+        <section class="workspace" aria-label="记录与详情">
+          <div class="list-panel">
+            <div class="list-heading">
+              <div>
+                <h2 id="list-title">全部经验</h2>
+                <span id="list-total" class="muted">正在加载</span>
+              </div>
+              <button
+                type="button"
+                id="new-memory-button"
+                class="icon-button"
+                title="新建候选经验"
+                aria-label="新建候选经验"
+              >
+                ＋
+              </button>
+            </div>
+            <div id="run-tabs" class="segmented" hidden>
+              <button type="button" data-run-tab="runs" class="selected">
+                运行记录</button
+              ><button type="button" data-run-tab="feedback">用户反馈</button>
+            </div>
+            <form id="search-form" class="list-search" role="search">
+              <label class="sr-only" for="search-input">搜索当前列表</label
+              ><span aria-hidden="true">⌕</span
+              ><input
+                id="search-input"
+                type="search"
+                placeholder="搜索标题、规则或编号"
+                autocomplete="off"
+                maxlength="500"
+              /><button
+                type="submit"
+                class="search-submit"
+                aria-label="执行搜索"
+              >
+                ↵
+              </button>
+            </form>
+            <div id="state-filter-wrap" class="filter-row">
+              <label for="state-filter">显示</label
+              ><select id="state-filter">
+                <option value="all">全部状态</option>
+                <option value="candidate">候选</option>
+                <option value="published">有已发布版本</option>
+                <option value="withdrawn">已撤回</option>
+                <option value="superseded">历史版本</option>
+                <option value="error">需检查记录</option></select
+              ><span id="list-context" class="muted">最新修订</span>
+            </div>
+            <div
+              id="record-list"
+              class="record-list"
+              aria-label="记录列表"
+              aria-busy="true"
+            >
+              <div class="loading-state">
+                <span class="spinner"></span>正在加载记录…
+              </div>
+            </div>
+            <div class="list-footer">
+              <span id="list-footer-note">来自本地私有经验库</span
+              ><button
+                type="button"
+                id="load-more-button"
+                class="text-button"
+                hidden
+              >
+                加载更多
+              </button>
+            </div>
+          </div>
+          <article
+            id="detail-panel"
+            class="detail-panel"
+            aria-label="所选记录详情"
+            aria-busy="false"
+          >
+            <div class="empty-state">
+              <span class="empty-icon" aria-hidden="true">◇</span>
+              <h2>选择一条经验</h2>
+              <p>查看规则、来源与修订，核对尚未生效的原因。</p>
+            </div>
+          </article>
+        </section>
+        <footer class="page-footer">
+          <span id="project-label">本地私有工作空间</span
+          ><span>来源确认 ≠ 规则发布 · 评测不调用模型</span>
+        </footer>
+      </main>
+    </div>
+    <dialog
+      id="action-dialog"
+      class="action-dialog"
+      aria-labelledby="dialog-title"
+    >
+      <div class="dialog-header">
+        <div>
+          <div id="dialog-eyebrow" class="eyebrow">人工维护</div>
+          <h2 id="dialog-title">记录详情</h2>
+        </div>
+        <button
+          type="button"
+          id="dialog-close"
+          class="icon-button"
+          aria-label="关闭对话框"
+        >
+          ×
+        </button>
+      </div>
+      <div id="dialog-body" class="dialog-body"></div>
+    </dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

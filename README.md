@@ -2,7 +2,7 @@
 
 初版由 OpenCode 主 agent 判断设备、条款边界、general/separate 关联和采购数量。Python 程序负责原文读取、定位映射、结构校验和保存；不调用外部抽取模型。
 
-首次理解经验机制，先看 [经验记忆技术方案与完整数据流](docs/memory-architecture.md)：涵盖存储形式、数据库结构、抽取与演进两条流程、回归门槛及当前限制。具体操作命令见 [经验维护说明](.opencode/skills/term-extract/references/experience.md)。
+首次理解经验机制，先看 [经验记忆技术方案与完整数据流](docs/memory-architecture.md)：涵盖存储形式、数据库结构、抽取与演进两条流程、回归门槛及当前限制。查看更新、核对来源与维护经验，可以直接使用 [本地记忆工作台](docs/memory-dashboard.md)；具体操作命令见 [经验维护说明](.opencode/skills/term-extract/references/experience.md)。
 
 ## 启动
 
@@ -10,7 +10,7 @@
 
 如果已经在运行 OpenCode，新增或修改配置后退出并重新启动，以加载本项目配置。
 
-当前版本为 0.3.0：七字段输出与文档索引版本 2 保持不变；正式提交增加主动复盘，自动保存不可变 run 和未验证经验候选，支持用户反馈与来源确认。成功经验可经过保护原有正确场景的回归后发布，无需制造 badcase。旧任务仍需使用新工作目录注册，固定本轮发布快照。
+当前版本为 0.4.0：增加本地可视化记忆工作台，展示规则正文、来源、修订差异、未生效原因、业务口径变更与操作历史。页面支持完善反馈、确认来源、创建修订、执行已准备的离线评测、人工发布与撤回，沿用原有门槛。七字段输出、文档索引版本 2 和每篇任务冻结经验快照的方式保持不变。
 
 克隆仓库后，从仓库根目录启动 OpenCode，避免父目录项目配置影响技能发现：
 
@@ -46,6 +46,8 @@ opencode
 - `.opencode/agents/term-memory-curator.md`：经验候选整理与回归 agent，无发布权限。
 - `.opencode/tools/`：OpenCode 文档与结果工具。
 - `.opencode/skills/term-extract/scripts/`：无模型调用的 Python 辅助程序。
+- `web/memory/`：记忆工作台的原生 HTML、CSS、JavaScript，无前端构建步骤或外部资源。
+- `docs/memory-dashboard.md`：工作台启动、页面含义与维护操作说明。
 - `runs/`：每次运行的索引、读取回执、草稿、校验报告和最终结果；不提交版本库。
 - `.term-memory/`：私有经验、不可变运行、反馈、来源确认及评测记录，Git 忽略；可外置到 `TERM_EXTRACT_MEMORY_DIR`。
 
@@ -103,7 +105,15 @@ node tests/structured_json_smoke.mjs 'D:\你的目录\structured_json'
 
 ## 经验演进
 
-空库也可以从第一篇开始：抽取 → 主 agent 主动复盘并提交 → 工具保存 run、来源和未验证候选 → 用户反馈或维护者确认来源 → curator 整理与评测 → 人工 CLI 发布 → 第二篇新任务按需召回。没有后台会话监听，也不会额外调用模型自动分析每段聊天。
+空库也可以从第一篇开始：抽取 → 主 agent 主动复盘并提交 → 工具保存 run、来源和未验证候选 → 用户反馈或维护者确认来源 → curator 整理与评测 → 人工在工作台或 CLI 发布 → 第二篇新任务按需召回。没有后台会话监听，也不会额外调用模型自动分析每段聊天。
+
+在仓库根目录启动页面，无需安装额外依赖：
+
+```powershell
+python -X utf8 .opencode/skills/term-extract/scripts/memory_ui.py
+```
+
+打开终端显示的本地地址，默认是 `http://127.0.0.1:8765/`。工作台读取与 OpenCode 相同的 `.term-memory/`（或相同的 `TERM_EXTRACT_MEMORY_DIR`），不会复制出另一套记忆。仅查看时加 `--read-only`；完整操作见 [页面说明](docs/memory-dashboard.md)。
 
 收到用户反馈时，extractor 用 `term_memory_feedback` 保存旧 `run_id`、反馈原话、复盘和可选修正稿，再按原文修正并新提交。修正稿在人工 `confirm-feedback` 前不是人工正确答案。CLI 直接提交而未附复盘时会留下 pending，可用 `reflect` 补齐；空 `insights` 须说明原因，不机械凑经验。
 
@@ -111,7 +121,7 @@ node tests/structured_json_smoke.mjs 'D:\你的目录\structured_json'
 
 候选不参与生产召回。来源须经 `confirm-run` 或 `confirm-feedback` 确认后才能评测或发布；确认运行正确不等于批准泛化规则。纯成功来源自动采用 success 评测：基线绑定已确认运行，两组断言均通过，并保护独立回归与反例。纠错或混合来源仍须证明 fix 改善。所有模式都禁止已有断言退化。
 
-评测只检查给定 baseline/candidate 工件，不自动运行抽取模型，不证明因果改善或全面业务正确；当前尚无真实效果验证。发布、撤回仍由人工 CLI 执行，agent 不能自填确认人或批准经验。正常抽取提交无需逐篇等待人工审批。
+评测只检查给定 baseline/candidate 工件，不自动运行抽取模型，不证明因果改善或全面业务正确；当前尚无真实效果验证。发布、撤回由人工在本地工作台或 CLI 执行，agent 不能自填确认人或批准经验。正常抽取提交无需逐篇等待人工审批。
 
 每篇任务注册时冻结已发布集合，召回默认最多三条、约 6 KiB。检索在本地执行，不调用辅助模型，但仍占用主 agent 的工具交互轮次和上下文。撤回影响之后注册的任务；已有任务保留原快照。操作命令、数据格式和权限边界见 [经验记忆说明](.opencode/skills/term-extract/references/experience.md)及[回归清单](.opencode/skills/term-extract/references/memory-evaluation.md)。
 

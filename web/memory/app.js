@@ -16,6 +16,9 @@ const labels = {
   boundary: "条款边界",
   association: "条款关系",
   missing_product: "产品漏抽",
+  needs_review: "需要确认",
+  merged: "已合并",
+  rejected: "已拒绝",
 };
 const state = {
   section: "memories",
@@ -153,12 +156,12 @@ async function overview() {
   for (const [id, key] of [
     ["published", "published"],
     ["candidate", "candidate"],
-    ["feedback", "pending_feedback"],
+    ["feedback", "pending_reviews"],
     ["runs", "runs"],
   ])
     $("count-" + id).textContent = o.counts[key];
   $("nav-memory-count").textContent =
-    o.counts.published + o.counts.candidate + o.counts.withdrawn;
+    o.counts.memories ?? o.counts.published + o.counts.candidate + o.counts.withdrawn;
   $("overview-notice").replaceChildren(
     el("span", "notice-icon", "i"),
     el(
@@ -175,7 +178,7 @@ async function overview() {
       el(
         "p",
         null,
-        "保存观察 → 核验来源 → 整理规则与评测 → 人工发布。固定业务口径的更新可在独立入口查看。",
+        "观察 → 候选 → 标签验证与独立回归 → 自动发布。没有标签或验证案例不足时保留候选，疑点进入待确认事项。",
       ),
     ),
   );
@@ -193,6 +196,8 @@ async function overview() {
   );
 }
 const sections = {
+  learning: ["抽取与学习", "选择纯抽取或标签学习，追踪盲抽、比较、经验验证和生效。", "学习任务"],
+  reviews: ["待确认事项", "只处理程序无法确定的差异和冲突；答复保留适用范围与审计记录。", "待确认事项"],
   memories: [
     "经验库",
     "查看候选、核验来源，让经验在发布后用于下一篇。",
@@ -237,7 +242,7 @@ async function navigate(section, options = {}) {
   $("list-title").textContent = info[2];
   $("run-tabs").hidden = section !== "runs";
   $("state-filter-wrap").hidden = section !== "memories";
-  $("search-form").hidden = section === "policy";
+  $("search-form").hidden = ["policy", "learning", "reviews"].includes(section);
   $("new-memory-button").hidden = section !== "memories";
   $("new-memory-button").disabled = state.readOnly;
   for (const n of document.querySelectorAll("[data-run-tab]"))
@@ -327,6 +332,9 @@ function card(item) {
   return n;
 }
 async function loadList(append = false) {
+  if (["learning", "reviews"].includes(state.section)) {
+    return window.TermEvolution.load();
+  }
   const ticket = ++state.request;
   state.detailRequest++;
   $("record-list").setAttribute("aria-busy", "true");
@@ -559,6 +567,7 @@ function memoryView(d) {
         state.tab = "evaluation";
         $("detail-panel").replaceChildren(memoryView(d));
       }),
+      button("进入标签学习", () => navigate("learning")),
     ),
   );
   if (d.active_revision)
@@ -1440,7 +1449,7 @@ for (const n of document.querySelectorAll("[data-stat]"))
     const key = n.dataset.stat;
     const task =
       key === "feedback"
-        ? navigate("runs", { runTab: "feedback" })
+        ? navigate("reviews")
         : key === "runs"
           ? navigate("runs")
           : navigate("memories", { filter: key });

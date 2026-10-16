@@ -14,7 +14,7 @@ import memory_store as store
 
 MemoryError = store.MemoryError
 POLICY = Path(".opencode/skills/term-extract/references/business-rules.md")
-NOTICE = "页面提供本地人工维护入口；确认来源不等于批准泛化规则，评测只检查给定工件，不调用抽取模型。"
+NOTICE = "纯抽取保留观察；标签学习先盲抽再比较，验证通过的经验自动发布。人工主要处理待确认事项。"
 
 
 def _has(connection, table):
@@ -108,6 +108,12 @@ class DashboardService:
 
     def _source(self, connection, source_id):
         source_id = store._string(source_id, "source_id", 128)
+        if source_id.startswith("case_"):
+            import evolution_store
+            record = evolution_store.get_case(self.root, source_id)
+            return {**record, "source_id": source_id, "kind": "trusted_label", "confirmed": True,
+                    "invalidated": False, "can_confirm": False, "has_corrected_result": True,
+                    "title": "用户提供的可信标签", "notice": "可信标签声明不等于人工批准经验。"}
         if source_id.startswith("corr_"):
             record = store._correction(connection, source_id)
             source = {key: value for key, value in record.items() if key not in {"before_json", "after_json"}}
@@ -155,7 +161,10 @@ class DashboardService:
             store._check_learning_sources(connection, payload, report)
             for cid in payload["correction_ids"]:
                 store._check_correction_files(store._correction(connection, cid))
-            target = summary.get("success_cases", 0) >= 1 if report.get("evaluation_mode") == "success" else summary["fix_improvements"] >= 1
+            mode = report.get("evaluation_mode")
+            target = ((summary.get("success_cases", 0) >= 1 or summary["fix_improvements"] >= 1)
+                      if mode == "paired_labeled_v1" else
+                      summary.get("success_cases", 0) >= 1 if mode == "success" else summary["fix_improvements"] >= 1)
             if not (report["status"] == "passed" and target and summary["regressions"] == 0
                     and summary["independent_regression_cases"] >= 1 and summary["counterexample_cases"] >= 1
                     and summary["unfixed_target_cases"] == 0):
@@ -216,8 +225,11 @@ class DashboardService:
                 evaluations.append({"evaluation_id": row["evaluation_id"], "status": "error", "summary": {}, "created_at": row["created_at"],
                                     "evaluation_mode": "", "usable": False, "blocking_reason": str(exc)})
         usable = next((item for item in evaluations if item["usable"]), None)
+        if usable and usable.get("evaluation_mode") == "paired_labeled_v1":
+            # 候选可以来自未标注的观察；真实可信案例对照通过后无需再确认原观察整篇正确。
+            blockers = [item for item in blockers if item["code"] != "SOURCE_UNCONFIRMED"]
         if not usable and memory["state"] != "published":
-            blockers.append({"code": "NO_USABLE_EVALUATION", "message": evaluations[0]["blocking_reason"] if evaluations else "无有效评测，请提供真实 baseline/candidate 工件及回归清单后运行离线评测。"})
+            blockers.append({"code": "NO_USABLE_EVALUATION", "message": evaluations[0]["blocking_reason"] if evaluations else "尚未通过可信案例验证。可在抽取与学习中提供标签与独立回归案例；旧手动离线评测入口仍可使用。"})
         audit = []
         for row in _rows(connection, "audit", "WHERE memory_id=? ORDER BY created_at DESC", (memory_id,)):
             try:
@@ -248,6 +260,12 @@ class DashboardService:
         return {"run": summary, "result": raw["result_json"], "evidence": raw["evidence_json"]}
 
     def _source_detail(self, connection, source_id):
+        if source_id.startswith("case_"):
+            import evolution_store
+            case = evolution_store.get_case(self.root, source_id, include_labels=True)
+            return {"source": self._source(connection, source_id), "run": None, "before_result": None,
+                    "after_result": case.get("labels", case.get("labels_json")), "snippets": [],
+                    "excerpt_notice": "标签与输入同套定位，案例原件已单独归档。"}
         try:
             source = self._source(connection, source_id)
         except (ValueError, KeyError, TypeError) as exc:
@@ -385,6 +403,11 @@ class DashboardService:
     def get(self, path: str, query: dict) -> dict:
         query = query or {}
         parts = [unquote(part) for part in path.strip("/").split("/")]
+        if parts[:2] in (["api", "learning"], ["api", "reviews"]):
+            import evolution_dashboard
+            value = evolution_dashboard.get(self.root, parts, query)
+            if value is not None:
+                return value
         if parts == ["api", "policy"]:
             return self._policy()
         with self._read() as connection:
@@ -395,15 +418,20 @@ class DashboardService:
                 current = store._file_hash(policy_path) if policy_path.is_file() else None
                 changed = [{"run_id": run["run_id"], "recorded_sha256": run.get("generation", {}).get("reference_sha256", {}).get("business-rules.md"), "current_sha256": current}
                            for run in runs if current and run.get("generation", {}).get("reference_sha256", {}).get("business-rules.md") not in (None, current)]
+                resolved = {store._parse(row["record_json"])["review_id"] for row in _rows(connection, "evoz_resolutions")}
+                pending_reviews = sum(store._parse(row["record_json"])["review_id"] not in resolved for row in _rows(connection, "evoz_reviews"))
                 return {"project": {"name": self.root.name, "path": str(self.root), "store_dir": str(store.resolve_store_dir(self.root))},
                         "counts": {"published": len(_rows(connection, "active")), "candidate": sum(item["state"] == "candidate" for item in memories),
+                                   "memories": len(memories), "needs_review": sum(item["state"] == "needs_review" for item in memories),
+                                   "pending_reviews": pending_reviews, "learning_jobs": len(_rows(connection, "workflow_jobs")),
+                                   "trusted_cases": len(_rows(connection, "evoz_cases")),
                                    "withdrawn": sum(item["state"] == "withdrawn" and not item["active_revision"] for item in memories),
                                    "runs": len(runs), "feedback": len(feedback), "pending_feedback": sum(not item["confirmed"] for item in feedback)},
                         "release_sha256": release, "status_message": error or ("尚无记忆记录；抽取后可在此审阅候选。" if not memories and not runs else NOTICE),
                         "policy_changed_runs": changed}
             if parts == ["api", "memories"]:
                 state = query.get("state", "all")
-                if state not in {"all", "candidate", "published", "withdrawn", "superseded", "error"}:
+                if state not in {"all", "candidate", "published", "withdrawn", "superseded", "error", "rejected", "merged", "needs_review"}:
                     raise MemoryError("state 不合法。")
                 raw_query = query.get("q", "")
                 if not isinstance(raw_query, str) or len(raw_query) > 500:
@@ -432,6 +460,11 @@ class DashboardService:
         if not isinstance(body, dict):
             raise MemoryError("请求体必须为JSON对象。")
         parts = [unquote(part) for part in path.strip("/").split("/")]
+        if parts[:2] in (["api", "learning"], ["api", "reviews"], ["api", "experiences"]):
+            import evolution_dashboard
+            value = evolution_dashboard.post(self.root, parts, body)
+            if value is not None:
+                return value
         if parts == ["api", "memories"]:
             memory_id = body.get("memory_id")
             with store._db(self.root, write=True) as connection:

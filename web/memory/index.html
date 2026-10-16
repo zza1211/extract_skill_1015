@@ -8,6 +8,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
     <script src="/app.js" defer></script>
+    <script src="/evolution.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -19,6 +20,12 @@
         </a>
         <div class="nav-caption">工作空间</div>
         <nav class="main-nav">
+          <button type="button" class="nav-item" data-section="learning">
+            <span class="nav-icon" aria-hidden="true">▷</span>抽取与学习
+          </button>
+          <button type="button" class="nav-item" data-section="reviews">
+            <span class="nav-icon" aria-hidden="true">◇</span>待确认事项
+          </button>
           <button
             type="button"
             class="nav-item active"
@@ -44,7 +51,7 @@
         <div class="sidebar-guide">
           <span class="guide-symbol" aria-hidden="true">✦</span>
           <strong>让判断有据可循</strong>
-          <p>本篇观察先留为候选，核验来源、评测后再决定是否发布。</p>
+          <p>无标签留观察，有标签先盲抽。验证经验后自动发布，疑点进入待确认事项。</p>
           <div class="mini-flow">
             <span>观察</span><i>→</i><span>核验</span><i>→</i><span>发布</span>
           </div>
@@ -52,7 +59,7 @@
         <footer class="sidebar-footer">
           <span id="connection-dot" class="connection-dot"></span
           ><span id="connection-label">正在连接本地服务</span
-          ><small>本地维护 · 0.4.0</small>
+          ><small>本地维护 · 0.5.0</small>
         </footer>
       </aside>
       <main id="main-content" class="main-content">
@@ -89,9 +96,9 @@
           <button type="button" class="stat-card" data-stat="feedback">
             <span class="stat-label"
               ><span class="stat-symbol purple" aria-hidden="true">☷</span
-              >待处理反馈</span
+              >待确认事项</span
             ><strong id="count-feedback">—</strong
-            ><span class="stat-note">补齐修正稿后人工核验</span>
+            ><span class="stat-note">只处理局部差异和经验冲突</span>
           </button>
           <button type="button" class="stat-card" data-stat="runs">
             <span class="stat-label"
@@ -156,6 +163,9 @@
                 <option value="published">有已发布版本</option>
                 <option value="withdrawn">已撤回</option>
                 <option value="superseded">历史版本</option>
+                <option value="needs_review">待处理冲突</option>
+                <option value="merged">已合并</option>
+                <option value="rejected">已拒绝</option>
                 <option value="error">需检查记录</option></select
               ><span id="list-context" class="muted">最新修订</span>
             </div>
@@ -196,7 +206,7 @@
         </section>
         <footer class="page-footer">
           <span id="project-label">本地私有工作空间</span
-          ><span>来源确认 ≠ 规则发布 · 评测不调用模型</span>
+          ><span>可信案例验证 · 疑点人工处理 · 发布可撤回</span>
         </footer>
       </main>
     </div>

@@ -17,6 +17,7 @@ MAX_BODY_BYTES = 3 * 1024 * 1024
 STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/evolution.js": ("evolution.js", "text/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
@@ -263,11 +264,12 @@ def create_server(project_root: Path, host: str = "127.0.0.1", port: int = 8765,
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="启动仅供本机人工使用的经验管理页面，不调用模型。")
+    parser = argparse.ArgumentParser(description="启动本机抽取与经验工作台；模型任务需显式启动。")
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[4])
     parser.add_argument("--host", default="127.0.0.1", help="只允许明确的 loopback 地址")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--read-only", action="store_true", help="只读查看，禁用全部 POST")
+    parser.add_argument("--no-maintenance", action="store_true", help="不启用服务存活期间的经验冲突维护")
     args = parser.parse_args(argv)
     try:
         server = create_server(args.project_root, args.host, args.port, args.read_only)
@@ -276,11 +278,17 @@ def main(argv=None) -> int:
     host, port = server.server_address[:2]
     shown = f"[{host}]" if ":" in host else host
     print(f"本机经验管理页面：http://{shown}:{port}/（{'只读' if args.read_only else '人工操作可用'}）", flush=True)
+    maintenance = None
+    if not args.read_only and not args.no_maintenance:
+        from memory_maintenance import start
+        maintenance = start(args.project_root.resolve())
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if maintenance is not None:
+            maintenance.set()
         server.server_close()
     return 0
 

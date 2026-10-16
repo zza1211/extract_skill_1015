@@ -1913,3 +1913,14 @@ code,
     transition: none !important;
   }
 }
+.evolution-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:12px 6px; border-bottom:1px solid var(--border, #e2e8e5); margin-bottom:12px; }
+.evolution-form { display:grid; gap:16px; }
+.evolution-form .form-field { display:grid; gap:8px; font-size:13px; color:#52625c; }
+.evolution-form select { width:100%; border:1px solid #dce5df; border-radius:8px; padding:10px; background:white; font:inherit; color:#263e34; }
+.evolution-form .check-field { display:flex; gap:10px; align-items:flex-start; font-size:13px; line-height:1.7; }
+.evolution-form .check-field input { margin-top:5px; }
+.record-card [data-evolution-id] { overflow-wrap:anywhere; }
+.badge.needs_review, .badge.needs_examples, .badge.budget_exhausted { background:#fff2de; color:#865a12; }
+.badge.running { background:#e7effa; color:#315880; }
+.badge.completed, .badge.resolved { background:#e4f2e9; color:#2b6845; }
+.badge.rejected, .badge.failed { background:#fbe9e7; color:#9b4035; }

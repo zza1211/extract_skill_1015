@@ -222,6 +222,14 @@ def _candidate(connection, memory_id: str, revision: int) -> dict:
     active = connection.execute("SELECT revision FROM active WHERE memory_id=?", (memory_id,)).fetchone()
     event = connection.execute("SELECT action FROM audit WHERE memory_id=? AND revision=? ORDER BY rowid DESC LIMIT 1", (memory_id, revision)).fetchone()
     state = "published" if active and active["revision"] == revision else ("withdrawn" if event and event["action"] == "withdraw" else "superseded" if event else "candidate")
+    if state == "candidate" and connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evoz_decisions'").fetchone():
+        from evolution_store import _decision, _candidate_review_status
+        decision = _decision(connection, memory_id, revision)
+        if decision:
+            state = decision["status"]
+        review_status = _candidate_review_status(connection, memory_id, revision)
+        if review_status["blocking"]:
+            state = review_status["state"]
     return {"memory_id": memory_id, "revision": revision, "content_sha256": row["content_sha256"],
             "payload": payload, "state": state, "created_at": row["created_at"]}
 
@@ -284,7 +292,14 @@ def _insert_candidate(connection, payload: dict, memory_id=None) -> dict:
     if payload.get("source_ids"):
         from memory_learning import _source
         for source_id in payload["source_ids"]:
-            _source(connection, source_id)
+            if source_id.startswith("case_"):
+                from evolution_store import _case, _check_case
+                case = _case(connection, source_id)
+                _check_case(case)
+                if case["split"] != "development":
+                    raise MemoryError("回归/保留集标签不能作为经验归纳来源。")
+            else:
+                _source(connection, source_id)
     latest = connection.execute("SELECT MAX(revision) FROM revisions WHERE memory_id=?", (selected_id,)).fetchone()[0]
     if memory_id is not None and latest is None:
         raise MemoryError("修订目标不存在；新经验请省略 memory_id。")
@@ -319,8 +334,8 @@ def _validate_report(report: Any, candidate: dict, base_release: str) -> dict:
         raise MemoryError("评测 status 只能为 passed/failed。")
     summary = report.get("summary")
     mode = report.get("evaluation_mode", "correction")
-    if mode not in ("correction", "success"):
-        raise MemoryError("evaluation_mode 只允许 correction/success。")
+    if mode not in ("correction", "success", "paired_labeled_v1"):
+        raise MemoryError("evaluation_mode 不在支持范围。")
     expected = SUMMARY_FIELDS | ({"success_cases"} if "evaluation_mode" in report else set())
     if not isinstance(summary, dict) or set(summary) != expected:
         raise MemoryError("评测 summary 字段不完整或存在额外字段。")
@@ -332,6 +347,10 @@ def _validate_report(report: Any, candidate: dict, base_release: str) -> dict:
 
 
 def _check_learning_sources(connection, payload: dict, report: dict) -> None:
+    if report.get("evaluation_mode") == "paired_labeled_v1":
+        from evolution_store import check_sealed_report
+        check_sealed_report(connection, payload, report)
+        return
     if not payload.get("source_ids"):
         if report.get("evaluation_mode", "correction") != "correction":
             raise MemoryError("成功经验评测必须绑定人工确认的成功来源。")
@@ -352,6 +371,8 @@ def _check_learning_sources(connection, payload: dict, report: dict) -> None:
 
 def register_evaluation(root: Path, memory_id, revision, report: dict) -> dict:
     # 仅供离线评测模块使用；没有任意 report 导入 CLI 或自动发布工具。
+    if isinstance(report, dict) and report.get("evaluation_mode") == "paired_labeled_v1":
+        raise MemoryError("自动实验报告只能由内部运行器注册，不能通过旧评测入口重复导入。")
     memory_id, revision = _string(memory_id, "memory_id", 128), _integer(revision, "revision")
     with _db(root, write=True) as connection:
         candidate = _candidate(connection, _string(memory_id, "memory_id", 128), _integer(revision, "revision"))
@@ -399,6 +420,8 @@ def publish(root: Path, memory_id, revision, evaluation_id, reviewer: str, note:
         candidate = _candidate(connection, _string(memory_id, "memory_id", 128), _integer(revision, "revision"))
         if candidate["state"] == "published":
             raise MemoryError("该修订已发布；不要重复发布。")
+        if candidate["state"] in {"rejected", "merged", "needs_review"}:
+            raise MemoryError("该候选被拒绝、合并或仍待复核，不能发布。")
         evaluation = _evaluation(connection, _string(evaluation_id, "evaluation_id", 128))
         if connection.execute("SELECT 1 FROM used_evaluations WHERE evaluation_id=?", (evaluation_id,)).fetchone():
             raise MemoryError("该评测已用于发布，不能再次使用；撤回后的重新发布需要重新评测。")
@@ -406,8 +429,13 @@ def publish(root: Path, memory_id, revision, evaluation_id, reviewer: str, note:
             raise MemoryError("评测记录属于其他候选修订。")
         report = _validate_report(evaluation["report"], candidate, _release(_published(connection)))
         _check_learning_sources(connection, candidate["payload"], report)
+        if report.get("evaluation_mode") == "paired_labeled_v1":
+            from evolution_store import _find
+            experiment = _find(connection, "evoz_experiments", "experiment_id", report["automation"]["experiment_id"])
+            if experiment["evaluation_id"] != evaluation_id:
+                raise MemoryError("自动发布必须使用原内部实验的唯一评测记录。")
         summary = report["summary"]
-        target_passed = summary.get("success_cases", 0) >= 1 if report.get("evaluation_mode") == "success" else summary["fix_improvements"] >= 1
+        target_passed = summary.get("success_cases", 0) >= 1 if report.get("evaluation_mode") in {"success", "paired_labeled_v1"} else summary["fix_improvements"] >= 1
         if not (report["status"] == "passed" and target_passed and summary["regressions"] == 0
                 and summary["independent_regression_cases"] >= 1 and summary["counterexample_cases"] >= 1 and summary["unfixed_target_cases"] == 0):
             raise MemoryError("发布门槛未通过：需有修复改善或成功案例、独立回归和反例，且无退化或未通过目标。")
@@ -514,10 +542,8 @@ def create_snapshot(root: Path, index_path: Path) -> dict:
 
 
 def _terms(text: str) -> set[str]:
-    terms = set(re.findall(r"[a-z0-9][a-z0-9_-]*", text.lower()))
-    for run in re.findall(r"[\u3400-\u9fff]+", text):
-        terms.update(run[i:i + 2] for i in range(len(run) - 1))
-    return terms
+    from memory_lexical import terms
+    return terms(text)
 
 
 def recall(root: Path, index_path: Path, query: str, limit: int = 3, max_bytes: int = 6144,

@@ -19,6 +19,7 @@ permission:
   websearch: deny
   term_document_*: allow
   term_result_*: allow
+  term_learning_*: allow
   term_memory_*: deny
   term_memory_recall: allow
   term_memory_feedback: allow
@@ -26,6 +27,8 @@ permission:
 ---
 
 你负责最终条款抽取判断。每次任务先明确加载 term-extract skill，并按照其中的业务口径读取原文、形成候选、核验并提交。
+
+用户提供输入及可信标签并要求学习时，走 skill 的标签学习入口：term_learning_create → start → status。不要先读取标签，后台会启用全新隔离会话盲抽并冻结结果，再比较和总结经验。用户选择普通抽取时可继续下述交互流程，也可通过高层工具创建 extract 任务。人工待办只在用户明确答复后调用 term_learning_reply，保留其原话；不得自行代答。
 
 输入中的同一 text 字符串或表格单元格可以包含多个 Cxx 标签。文档工具会记录每个标签的位置，保留原文和行列关系；多个标签是合法输入，不要按旧版的一字符串一标签限制拒绝。
 

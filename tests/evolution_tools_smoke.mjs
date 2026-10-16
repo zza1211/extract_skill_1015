@@ -1,0 +1,33 @@
+// 真实工具/CLI桥接的无模型 smoke；所有数据只存临时目录。
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import * as learning from "../.opencode/tools/term_learning.ts";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const directory = await mkdtemp(path.join(os.tmpdir(), "term-evolution-tools-"));
+process.env.TERM_EXTRACT_MEMORY_DIR = path.join(directory, "memory");
+const context = { directory:root };
+const invoke = async (tool,args) => JSON.parse(await tool.execute(args,context));
+const source = path.join(directory,"source.json"), labels = path.join(directory,"labels.json");
+await writeFile(source,JSON.stringify([{text:"<C1>Access Point<C2>Support Wi-Fi 6.<C3>Procurement quantity: 2 access points."}]));
+await writeFile(labels,JSON.stringify([{id:0,条款标题:"Access Point",条款分类:"normal",相关条款:[],产品分类:"WLAN AP",定位标识:["<C1>","<C2>"],产品数量:"2"}]));
+const job = await invoke(learning.create,{mode:"learn_labels",input_path:source,labels_path:labels,family_id:"synthetic-family"});
+assert.equal(job.mode,"learn_labels"); assert.equal(job.state,"queued");
+assert.equal(job.labels,undefined); assert.equal(job.labels_json,undefined);
+const execute=promisify(execFile);
+await execute(process.env.TERM_EXTRACT_PYTHON || "python",["-B","-X","utf8",path.join(root,".opencode/skills/term-extract/scripts/learning_runner.py"),"--project-root",root,"run","--job-id",job.job_id],{cwd:root,windowsHide:true,env:process.env});
+const status=await invoke(learning.status,{job_id:job.job_id});
+assert.equal(status.state,"needs_configuration"); assert.equal(status.usage.calls,0);
+const cases=await invoke(learning.import_case,{input_path:source,labels_path:labels,family_id:"synthetic-family",split:"development"});
+assert.equal(cases.case_id,job.case_id);
+const reviewScript="import sys;sys.path.insert(0,'.opencode/skills/term-extract/scripts');import evolution_store as e;import json;print(json.dumps(e.create_review('.',kind='comparison',title='合成问题',question='页脚可否保留？',context={},choices=['harmless','uncertain'],subject={'case_id':'test'})))";
+const created=JSON.parse((await execute(process.env.TERM_EXTRACT_PYTHON || "python",["-B","-X","utf8","-c",reviewScript],{cwd:root,windowsHide:true,env:process.env,encoding:"utf8"})).stdout);
+const reply=await invoke(learning.reply,{review_id:created.review_id,decision:"harmless",answer:"合成维护者答复：是页脚。",source_ref:"合成消息引用"});
+assert.equal(reply.resolution.channel,"conversation"); assert.equal(reply.scope,"case");
+const reviews=await invoke(learning.reviews,{state:"resolved"}); assert.equal(reviews.total,1);
+console.log(JSON.stringify({ok:true,blind_job_metadata:true,no_model_without_configuration:true,shared_review_queue:true,output_directory:directory,semantic_accuracy_tested:false}));

@@ -409,6 +409,13 @@ def build_response(index: dict[str, Any], index_hash: str, cursor: str,
         if search_info:
             model_view["match_count_total"] = len(search_info["matched"])
             model_view["matched_tags"] = [p["tag"] for p in parts if p["unit_id"] in search_info["matched"] and p["tag"]]
+        else:
+            # 在建包阶段计入动作提示，不能在字节检查后追加而挤占原文预算。
+            model_view["next_action"] = (
+                "已有明确采购对象时，先用本代理的候选保存工具增量保存暂定候选和疑点，再沿 next_cursor 继续读取；无需先确定精确边界、关联和数量。"
+                if next_cursor is not None else
+                "本次读取范围已到末尾；范围补读结束不等于全文读完。首次通读至此时，下一步立即调用本代理的候选保存工具保存暂定候选和疑点；边界、关联和数量可待核验。"
+            )
         sized_bytes(model_view)
         result["model_view"] = model_view
     sized_bytes(result)

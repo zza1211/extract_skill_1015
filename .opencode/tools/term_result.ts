@@ -4,11 +4,11 @@ import path from "node:path";
 import { digest, executionContext, output, projectRoot, python, resolveFile, saveDraft, withJsonFile } from "../skills/term-extract/scripts/opencode_bridge.ts";
 
 export const checkpoint = tool({
-  description: "保存主 agent 的简短采购对象候选、区间、数量来源和疑点，供后续核验或中断恢复；不是最终提交，不判断候选语义。",
+  description: "增量保存已读原文中的简短采购对象候选、暂定区间、数量来源和疑点。出现明确对象即可保存，不必等全文或所有判断完成；全文最后一批读取后应先保存，再围绕疑点核验。不是最终提交，不判断候选语义。",
   args: {
     index_path: tool.schema.string(),
-    candidates_json: tool.schema.string().describe("候选对象 JSON 数组字符串；可含条款标题、拟定区间、数量来源和疑点，不复述全部参数"),
-    notes: tool.schema.string().optional().describe("本阶段的简短工作说明"),
+    candidates_json: tool.schema.string().describe("候选对象 JSON 数组字符串；可含条款标题、暂定区间、数量来源和具体疑点，待定归属/边界/数量可以标明待确认；不复述全部参数。尚未识别到对象时可传 [] 并在 notes 写待核查范围"),
+    notes: tool.schema.string().optional().describe("简短记录已读范围、下一读取位置和待核查事项，不保存内部思维链"),
   },
   async execute(args, context) {
     const root = projectRoot(context.directory);
@@ -26,11 +26,11 @@ export const checkpoint = tool({
       status: "candidate_checkpoint",
       index_sha256: await digest(indexPath),
       source_path: index.source_path,
-      skill_version: "0.6.0",
+      skill_version: "0.6.1",
       candidates,
       notes: args.notes ?? "",
     }, null, 2) + "\n", "utf8");
-    return output({ saved: true, stage: "candidate", candidate_count: candidates.length, checkpoint_path: checkpointPath, next_action: "围绕候选中的具体疑点核验，再生成正式结果并校验。" });
+    return output({ saved: true, stage: "candidate", candidate_count: candidates.length, checkpoint_path: checkpointPath, next_action: "若全文尚未读完，沿 next_cursor 继续完整读取，再更新候选；若已读完，批量补读或搜索候选中的具体疑点，逐步确定归属、边界和数量，再生成正式结果并校验。候选保存不代表提交，最终仍须完成覆盖与语义自检。" });
   },
 });
 

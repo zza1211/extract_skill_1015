@@ -31,6 +31,8 @@ stdout 为 UTF-8 JSON；错误为中文 stderr，退出码 2。默认诊断 CLI 
 
 OpenCode 工具默认使用 `--view compact`。worker 返回包含完整 parts 的内部 JSON 和 `model_view`；只按 `model_view` 的完整 UTF-8 JSON 大小装包，详细 parts 不挤占模型预算。内部 worker 最大 1 MiB、每次最多 512 个定位单元，超过也继续分页；它不是应直接加载到模型的文件。OpenCode 仅交付 `model_view`，保留原文、短位置头、table_context、游标和部分标签提示，省去重复标签数组、所有原始偏移和完整 parts。同段落/单元格的连续片段拼接，非连续搜索片段不拼接。compact 模式的 `--max-bytes` 约束 `model_view.byte_size`，不能用内部 worker.byte_size 推算模型上下文开销。
 
+compact 读取响应还包含计入字节预算的 `next_action`：有后续片段时，已有明确采购对象可先增量保存候选与疑点，再沿游标继续；本次范围读至末尾时，提示首次通读后立即保存暂定候选，不要求先敲定边界、关联与数量。该提示仅说明本次读取范围的状态；范围补读的 `has_more=false` 不能证明全文已读完，完整交付仍按累计回执核验。搜索响应不包含此阶段提示，也不能代替全文读取。
+
 工具运行时会补 cursor=`0`、limit=`20`、max_bytes=`24576`，不依赖模型必须填所有可选参数。诊断 CLI 和 OpenCode 工具的模型输出形状不同：下面的 parts 说明是机器索引/worker/回执契约。
 
 模型用的 term_document_search 在本次 draft/candidates.json 尚未保存或 index 哈希不匹配时，会返回先调用 term_result_checkpoint 的短提示。候选可以不完整；要求是先记录具体候选/疑点，再为这些问题搜索。Python search CLI 仍可单独诊断，无该阶段限制。

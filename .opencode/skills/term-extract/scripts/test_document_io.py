@@ -38,6 +38,10 @@ class DocumentIOTests(unittest.TestCase):
                 self.assertLessEqual(len(page["parts"]), doc.MAX_COMPACT_UNITS)
                 for key in ("cursor", "next_cursor", "has_more", "partial_tags", "text"):
                     self.assertEqual(model_view[key], page[key])
+                if search is None:
+                    self.assertIn("本代理的候选保存工具", model_view["next_action"])
+                else:
+                    self.assertNotIn("next_action", model_view)
             else:
                 self.assertLessEqual(page["byte_size"], max_bytes)
             self.assertFalse(page["truncated"])
@@ -310,7 +314,7 @@ class DocumentIOTests(unittest.TestCase):
         self.assertIn(cell, model_view["text"])
         self.assertNotIn("u000001", model_view["text"])
         self.assertEqual(model_view["unit_count"], 4)
-        self.assertEqual(set(model_view), {"cursor", "next_cursor", "has_more", "text", "table_context", "partial_tags", "unit_count", "delivery_note", "byte_size"})
+        self.assertEqual(set(model_view), {"cursor", "next_cursor", "has_more", "text", "table_context", "partial_tags", "unit_count", "delivery_note", "next_action", "byte_size"})
         index, _ = doc.load_index(path)
         self.assertEqual(self.reconstructed([page]), {u["unit_id"]: u["source_text"] for u in index["units"]})
         layout = model_view["table_context"][0]["merges"][0]
@@ -330,9 +334,29 @@ class DocumentIOTests(unittest.TestCase):
             self.assertIn("chars=", page["model_view"]["text"])
             self.assertEqual(page["model_view"]["partial_tags"], ["<C91>"])
             self.assertNotIn("<C91>", page["complete_tags"])
+            action = page["model_view"]["next_action"]
+            if page["has_more"]:
+                self.assertIn("增量保存暂定候选和疑点", action)
+                self.assertIn("next_cursor", action)
+            else:
+                self.assertIn("本次读取范围已到末尾", action)
+                self.assertIn("下一步立即调用本代理的候选保存工具", action)
+                self.assertIn("可待核验", action)
         self.assertFalse(pages[-1]["has_more"])
         self.assertTrue(pages[-1]["parts"][0]["ends_unit"])
         self.assertGreater(pages[-1]["parts"][0]["part_start"], 0)
+
+    def test_compact_range_end_does_not_claim_full_document_read(self):
+        result = self.prepare([{"text": "<C1>前文"}, {"text": "<C2>待核验设备"}, {"text": "<C3>后文"}])
+        page = doc.read_document(Path(result["index_path"]), start="<C2>", end="<C2>", view="compact")
+        self.assertFalse(page["has_more"])
+        self.assertEqual(page["tags"], ["<C2>"])
+        self.assertEqual(self.reconstructed([page]), {"u000002": "<C2>待核验设备"})
+        action = page["model_view"]["next_action"]
+        self.assertIn("本次读取范围已到末尾", action)
+        self.assertIn("范围补读结束不等于全文读完", action)
+        self.assertIn("首次通读至此时", action)
+        self.assertLessEqual(len(doc.sized_bytes(page["model_view"])), doc.MAX_BYTES)
 
     def test_compact_search_does_not_stitch_noncontiguous_segments(self):
         original = "prefix<C91>MATCH one\n<C2>quiet middle\n<C15>MATCH two"

@@ -1,6 +1,6 @@
 # 条款抽取 Skill POC
 
-**0.6.0：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆，不发起模型调用。暂不引入向量模型。
+**0.6.1：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆，不发起模型调用。暂不引入向量模型。
 
 先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
 
@@ -20,6 +20,10 @@ opencode --agent term-extractor
 $env:TERM_EXTRACT_PYTHON = 'C:\Python311\python.exe'
 opencode --agent term-extractor
 ```
+
+主代理默认推理档位为 `low`，仍由 OpenCode 选择模型；使用其他模型时选择其支持的档位。**已有会话手动选择的 `high` / `max` 可以覆盖默认值**，更新项目后应重启 OpenCode，并检查当前档位。DeepSeek 的推理内容也占单轮生成预算，档位过高时可能在调用下一工具或输出结果前就耗尽预算。
+
+读取过程中可以保存暂定候选；通读结束后先落盘候选和疑点，再核验归属、精确边界及数量。候选不要求预先解决所有问题，最终提交的读取完整性和证据要求保持不变。
 
 两种模式使用同一主代理：
 
@@ -47,6 +51,22 @@ opencode --agent term-extractor
 ```
 
 每篇标签学习使用新会话，避免上一篇答案留在上下文。`begin` 只私有归档标签；主代理通过正常文档工具完成抽取与真实提交后，`compare` 才冻结并交付标签对照。不能把看过答案后的结果替换成首次预测。
+
+如果会话在读取后结束却没有结果，先检查是否真正调用 `term_result_commit` 成功；读完、保存候选或通过结构校验都不等于完成。若会话导出的最后一轮为 `finish=length`，尤其只有推理 token 而没有文本或工具调用，说明这一轮生成被截断，不要直接重复同样的长推理。可在原会话切换到 `low` 并发送：
+
+```text
+继续本次抽取，沿用现有 index 和工作目录，不要重新 prepare。
+先立即调用 term_result_checkpoint 保存暂定候选；归属、边界和数量未确定的写成疑点。
+然后围绕疑点补读核验、validate 和 commit，报告最终结果路径及 run_id。
+```
+
+也可使用原生 CLI 恢复原会话：
+
+```powershell
+opencode run --session 'ses_你的会话ID' --agent term-extractor --variant low '继续本次抽取，沿用现有 index，先保存暂定候选和疑点，再核验、校验并提交。'
+```
+
+恢复原会话可沿用已交付原文及回执；如果另开会话，必须重新实际读取全文，不能把旧会话回执当成本次已读取。恢复指引不是后台重试器，生成上限、上下文不足或工具错误仍需如实处理。
 
 ## 网页只管理记忆
 

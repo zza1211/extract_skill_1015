@@ -85,7 +85,7 @@ export const read = tool({
     const response = await python(root, "document_io.py", argv);
     const result = compactOutput(response, maxBytes);
     // 视图序列化和字节检查成功后，使用内部完整 parts 记录实际覆盖。
-    await recordRead(indexPath, cursor, { start_tag: args.start_tag, end_tag: args.end_tag }, response);
+    await recordRead(indexPath, cursor, { start_tag: args.start_tag, end_tag: args.end_tag }, response, context);
     return result;
   },
 });

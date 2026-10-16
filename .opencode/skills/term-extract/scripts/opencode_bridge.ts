@@ -70,7 +70,12 @@ export function output(value: unknown): string {
   return result;
 }
 
-export async function recordRead(indexPath: string, cursor: string, request: any, response: any): Promise<void> {
+export function executionContext(context: any): any {
+  if (!context?.sessionID || !context?.messageID || !context?.agent) return null;
+  return { session_id: context.sessionID, message_id: context.messageID, agent: context.agent };
+}
+
+export async function recordRead(indexPath: string, cursor: string, request: any, response: any, context?: any): Promise<void> {
   // 在返回大小校验通过后才记录。回执证明交付范围，不证明模型理解。
   const receipt = {
     index_sha256: await digest(indexPath),
@@ -88,6 +93,7 @@ export async function recordRead(indexPath: string, cursor: string, request: any
     view: response.model_view ? "compact" : "machine",
     byte_size: Buffer.byteLength(JSON.stringify(response.model_view ?? response), "utf8"),
     worker_byte_size: response.byte_size,
+    execution_context: executionContext(context),
   };
   await appendFile(path.join(path.dirname(indexPath), "read_receipts.jsonl"), JSON.stringify(receipt) + "\n", "utf8");
 }

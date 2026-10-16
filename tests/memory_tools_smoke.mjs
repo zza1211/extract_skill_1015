@@ -125,10 +125,14 @@ try {
   const curator = await readFile(path.join(root, ".opencode", "agents", "term-memory-curator.md"), "utf8");
   for (const settings of [extractor, curator]) {
     assert.match(settings, /term_memory_\*:\s*deny/);
-    for (const permission of ["bash", "edit", "task"]) assert.match(settings, new RegExp(`${permission}:\\s*deny`));
+    for (const permission of ["bash", "edit"]) assert.match(settings, new RegExp(`${permission}:\\s*deny`));
   }
+  assert.match(curator, /task:\s*deny/);
+  assert.match(extractor, /task:\s*\r?\n\s*"\*":\s*deny\s*\r?\n\s*term-trial:\s*allow/);
+  assert.match(extractor, /term_trial_\*:\s*deny/);
+  assert.match(extractor, /term_memory_show:\s*allow/);
   assert.match(extractor, /term_memory_recall:\s*allow/);
-  for (const tool of ["correction", "show", "propose", "evaluate", "publish", "withdraw", "import_correction"]) {
+  for (const tool of ["correction", "propose", "evaluate", "publish", "withdraw", "import_correction"]) {
     assert.doesNotMatch(extractor, new RegExp(`term_memory_${tool}:\\s*allow`));
   }
   for (const tool of ["publish", "withdraw", "import_correction"]) assert.ok(!(tool in memories));

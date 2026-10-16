@@ -264,7 +264,7 @@ def create_server(project_root: Path, host: str = "127.0.0.1", port: int = 8765,
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="启动本机抽取与经验工作台；模型任务需显式启动。")
+    parser = argparse.ArgumentParser(description="启动本机经验管理工作台；抽取和学习由 OpenCode agent 执行。")
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[4])
     parser.add_argument("--host", default="127.0.0.1", help="只允许明确的 loopback 地址")
     parser.add_argument("--port", type=int, default=8765)

@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { digest, output, projectRoot, python, resolveFile, saveDraft, withJsonFile } from "../skills/term-extract/scripts/opencode_bridge.ts";
+import { digest, executionContext, output, projectRoot, python, resolveFile, saveDraft, withJsonFile } from "../skills/term-extract/scripts/opencode_bridge.ts";
 
 export const checkpoint = tool({
   description: "保存主 agent 的简短采购对象候选、区间、数量来源和疑点，供后续核验或中断恢复；不是最终提交，不判断候选语义。",
@@ -26,7 +26,7 @@ export const checkpoint = tool({
       status: "candidate_checkpoint",
       index_sha256: await digest(indexPath),
       source_path: index.source_path,
-      skill_version: "0.5.0",
+      skill_version: "0.6.0",
       candidates,
       notes: args.notes ?? "",
     }, null, 2) + "\n", "utf8");
@@ -70,6 +70,9 @@ export const commit = tool({
     }
     const reflection = JSON.parse(args.reflection_json);
     const argv = ["--project-root", root, "--index", indexPath, "--result", resolveFile(root, args.result_path), "--evidence", resolveFile(root, args.evidence_path), "--receipts", path.join(path.dirname(indexPath), "read_receipts.jsonl"), "--out-dir", path.join(path.dirname(indexPath), "final"), "--model-id", args.model_id || "未记录"];
+    const actualContext = executionContext(context);
+    if (actualContext) argv.push("--execution-context-json", JSON.stringify(actualContext));
+    if (context.agent === "term-trial") argv.push("--trial-only");
     if (args.allow_demo) argv.push("--allow-demo");
     return withJsonFile(reflection, async file =>
       output(await python(root, "commit_result.py", [...argv, "--reflection-file", file])));

@@ -84,6 +84,8 @@ def main() -> int:
     parser.add_argument("--receipts", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--model-id", default="未记录")
+    parser.add_argument("--execution-context-json", help="OpenCode 工具注入的会话信息；不由模型参数填写。")
+    parser.add_argument("--trial-only", action="store_true", help="独立试验仅封存结果，不登记为学习来源。")
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[4])
     reflection_input = parser.add_mutually_exclusive_group()
     reflection_input.add_argument("--reflection-json", help="主 agent 的简短复盘；旧 CLI 省略时登记为待复盘，不伪造经验。")
@@ -98,6 +100,8 @@ def main() -> int:
             from memory_store import _parse, _read_json
             raw_reflection = _read_json(args.reflection_file, 64 * 1024) if args.reflection_file else _parse(args.reflection_json)
             reflection = validate_reflection(raw_reflection, index)
+        if args.trial_only and (reflection is None or reflection["insights"]):
+            raise ValueError("独立试验必须提交空经验复盘，不能产生学习来源或候选。")
         result = load_json(Path(args.result))
         evidence = load_json(Path(args.evidence))
         validator = Path(__file__).with_name("validate_result.py")
@@ -137,7 +141,7 @@ def main() -> int:
             "status": "demo_submitted" if demo else "submitted",
             "production_submittable": not demo,
             "model_id": args.model_id,
-            "skill_version": "0.5.0",
+            "skill_version": "0.6.0",
             "skill_sha256": hashlib.sha256(skill_path.read_bytes()).hexdigest(),
             "reference_sha256": reference_hashes,
             "source_path": index.get("source_path"),
@@ -147,6 +151,15 @@ def main() -> int:
             "memory": memory,
             "semantic_validation": "由主 agent 核验；程序没有验证选型参数完整性、漏产品或数量语义。",
         }
+        if args.execution_context_json:
+            context = json.loads(args.execution_context_json)
+            if not isinstance(context, dict) or set(context) != {"session_id", "message_id", "agent"} or any(not isinstance(v, str) or not v.strip() for v in context.values()):
+                raise ValueError("执行上下文必须包含真实 session_id/message_id/agent。")
+            record["execution_context"] = context
+        if args.trial_only:
+            if record.get("execution_context", {}).get("agent") != "term-trial":
+                raise ValueError("试验提交必须来自 term-trial 的真实工具执行上下文。")
+            record["trial_only"] = True
         result_text = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
         evidence_text = json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"
         record["result_sha256"] = hashlib.sha256(result_text.encode("utf-8")).hexdigest()
@@ -154,9 +167,10 @@ def main() -> int:
         result_path.write_text(result_text, encoding="utf-8", newline="\n")
         evidence_path.write_text(evidence_text, encoding="utf-8", newline="\n")
         record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-        learning = ({"status": "demo_skipped", "notice": "演示运行不进入经验库。"}
+        learning = ({"status": "trial_skipped", "notice": "独立试验不登记学习来源，不产生经验。"} if args.trial_only else
+                    {"status": "demo_skipped", "notice": "演示运行不进入经验库。"}
                     if demo else {"status": "pending_registration"})
-        if not demo:
+        if not demo and not args.trial_only:
             # 抽取结果已经保存。学习失败单独报告，不把已提交结果误报为失败。
             try:
                 learning = register_run(args.project_root, index_path, result_path, evidence_path, record_path)

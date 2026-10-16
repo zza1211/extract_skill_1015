@@ -229,7 +229,7 @@ class DashboardService:
             # 候选可以来自未标注的观察；真实可信案例对照通过后无需再确认原观察整篇正确。
             blockers = [item for item in blockers if item["code"] != "SOURCE_UNCONFIRMED"]
         if not usable and memory["state"] != "published":
-            blockers.append({"code": "NO_USABLE_EVALUATION", "message": evaluations[0]["blocking_reason"] if evaluations else "尚未通过可信案例验证。可在抽取与学习中提供标签与独立回归案例；旧手动离线评测入口仍可使用。"})
+            blockers.append({"code": "NO_USABLE_EVALUATION", "message": evaluations[0]["blocking_reason"] if evaluations else "尚未通过可信案例验证。请在 OpenCode 中进行标签学习与独立验证；网页可管理可信案例。旧手动离线评测入口仍可使用。"})
         audit = []
         for row in _rows(connection, "audit", "WHERE memory_id=? ORDER BY created_at DESC", (memory_id,)):
             try:

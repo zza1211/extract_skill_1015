@@ -196,7 +196,7 @@ async function overview() {
   );
 }
 const sections = {
-  learning: ["抽取与学习", "选择纯抽取或标签学习，追踪盲抽、比较、经验验证和生效。", "学习任务"],
+  learning: ["学习与案例", "查看 OpenCode 的自主学习记录，维护可信案例；抽取和模型执行统一在 OpenCode 中完成。", "学习记录"],
   reviews: ["待确认事项", "只处理程序无法确定的差异和冲突；答复保留适用范围与审计记录。", "待确认事项"],
   memories: [
     "经验库",
@@ -567,7 +567,7 @@ function memoryView(d) {
         state.tab = "evaluation";
         $("detail-panel").replaceChildren(memoryView(d));
       }),
-      button("进入标签学习", () => navigate("learning")),
+      button("查看学习与案例", () => navigate("learning")),
     ),
   );
   if (d.active_revision)

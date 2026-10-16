@@ -1,95 +1,105 @@
 # 条款抽取 Skill POC
 
-由 OpenCode 判断设备、技术条款边界、general/separate 关系和采购数量，Python 负责定位、结构检查、任务和经验存储。当前版本 **0.5.0** 增加两种运行模式、可信标签对照、自动实验与局部人工待办；暂不引入向量模型。
+**0.6.0：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆，不发起模型调用。暂不引入向量模型。
 
-先看[抽取与经验演进方案](docs/learning-evolution.md)，了解从第一篇标书产生观察、验证候选、影响下一篇的完整流程。页面操作见[本地工作台说明](docs/memory-dashboard.md)，存储和旧维护入口见[记忆架构](docs/memory-architecture.md)。
+先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
 
 ## 启动
 
-需要 Python 3.10+ 和支持项目 skills、custom tools 的 OpenCode。工具依赖版本见 `.opencode/package.json`。在仓库根目录启动，配置修改后重新启动 OpenCode：
+需要 Python 3.10+ 和支持项目 Skill、自定义工具与原生 task 的 OpenCode。工具依赖见 `.opencode/package.json`。在仓库根目录执行，配置变更后重启 OpenCode：
 
 ```powershell
 git clone https://github.com/zza1211/extract_skill_1015.git
 Set-Location extract_skill_1015
-opencode
+opencode --agent term-extractor
 ```
 
-默认 agent 为 `term-extractor`。通过 OpenCode `/connect` 配置模型服务、`/models` 选择模型；密钥由 OpenCode 管理，不写进本项目。若 Python 不在 PATH：
+项目默认代理也是 `term-extractor`，可直接 `opencode`。模型和凭据由 OpenCode 会话管理，不在本项目或网页保存另一套配置。若 Python 不在 PATH：
 
 ```powershell
 $env:TERM_EXTRACT_PYTHON = 'C:\Python311\python.exe'
-opencode
+opencode --agent term-extractor
 ```
 
-工作台在另一个终端启动，无 Web 框架或前端构建依赖：
+两种模式使用同一主代理：
+
+| 模式 | 输入 | 主代理行为 |
+|---|---|---|
+| 纯条款抽取 | 标书 JSON | 自主抽取与校验，保存原文支持的观察；观察不是正确标签 |
+| 标签学习 | 输入、可信正确结果、案例族 | 先抽取并提交，冻结后看标签，比较复盘，再组织独立验证 |
+
+纯抽取示例：
+
+```text
+请使用 term-extract 技能抽取 D:\私有数据\input.json。
+自主读取、核验边界和数量、校验并提交，记录有依据的观察或无新经验原因。
+```
+
+标签学习示例：
+
+```text
+请使用 term-extract 技能进行标签学习。
+输入：D:\私有数据\input.json
+正确标签：D:\私有数据\labels.json
+案例族：campus-template-a
+标签已按当前口径确认，且与输入使用同一套 Cxx。
+先完成盲抽并冻结预测，再比较标签、总结经验和验证。
+```
+
+每篇标签学习使用新会话，避免上一篇答案留在上下文。`begin` 只私有归档标签；主代理通过正常文档工具完成抽取与真实提交后，`compare` 才冻结并交付标签对照。不能把看过答案后的结果替换成首次预测。
+
+## 网页只管理记忆
+
+另开终端启动，无前端构建依赖：
 
 ```powershell
 python -X utf8 .opencode/skills/term-extract/scripts/memory_ui.py
 ```
 
-打开终端显示的本机地址，默认 `http://127.0.0.1:8765/`。先在“抽取与学习 → 模型设置”选择本机 OpenCode 的 `provider/model` 和预算；网页任务使用这个显式配置。仅查看时可加 `--read-only`。
+打开终端地址，默认 `http://127.0.0.1:8765/`。网页可查看学习记录、经验和修订、导入可信案例、回答待办、检查冲突及撤回；不选择模型、不创建或继续抽取。只读浏览可加 `--read-only`。
 
-## 两种运行模式
-
-| 模式 | 输入 | 流程 |
-|---|---|---|
-| 纯条款抽取 | 标书 JSON | 抽取、自检、保存有证据的观察，候选等待可信案例验证 |
-| 标签学习 | 标书 JSON＋当前口径正确结果＋案例族 | 隔离盲抽、冻结预测、标签对照、归纳候选、自动实验 |
-
-在工作台“抽取与学习”新建任务即可；也可对 OpenCode 说明：
-
-```text
-加载 term-extract skill，用纯条款抽取模式处理 D:\私有数据\input.json。
-通过 term_learning_create / start 创建并启动任务，完成后说明结果、经验和待确认事项。
-```
-
-```text
-用标签学习模式处理 D:\私有数据\input.json。
-正确标签为 D:\私有数据\labels.json，已按当前口径确认且使用同一套 Cxx。
-案例族为 campus-template-a。先创建隔离任务，不要在当前抽取会话提前读取标签。
-```
-
-高层任务调用隔离 OpenCode 工作器，完整交付原文，记录模型事件、预测和实验工件。标签范围不同不直接判错，先进行局部语义判断；无法确定的问题进入“待确认事项”。可以在网页作答，也可明确答复某项待办，由工具保存到同一记录。回答后继续原任务，不重做已冻结预测。
-
-可信标签导入无需重复人工确认。学习案例、独立回归与反例仍需区分案例族，保留测试不参与归纳。自动发布取决于实验门槛和设置；仅自检通过或保存候选不等于经验已经生效。
+0.5.0 的 Python 作业保留只读历史，旧 create/start/run/settings/models 入口明确停用。新的抽取与学习不进入旧运行器。网页中的 OpenCode 指引只复制提示词，不自动发给模型。
 
 ## 输入与输出
 
-输入为按原文顺序排列的 `text` / `table` 对象数组，标签直接位于段落和表格单元格字符串中。多个真实标签可由准备程序拆成定位单元。生产输入缺少真实标签会报错，详见[输入格式](.opencode/skills/term-extract/references/input-format.md)。
+输入为按原文顺序排列的 `text / table` 对象数组，Cxx 直接位于段落和单元格字符串中。多个真实标签可由准备工具拆成定位单元；生产输入缺少真实标签会报错，详见[输入格式](.opencode/skills/term-extract/references/input-format.md)。
 
-最终结果仍是七字段 JSON 数组：`id`、`条款标题`、`条款分类`、`相关条款`、`产品分类`、`定位标识`、`产品数量`。产品分类仅参考；质量重点是目标设备齐全、选型参数完整、不混入其他设备参数、数量与关系正确。机柜、布线和纯品牌准入的范围按 [business-rules.md](.opencode/skills/term-extract/references/business-rules.md) 执行。
+最终为七字段 JSON 数组：`id`、`条款标题`、`条款分类`、`相关条款`、`产品分类`、`定位标识`、`产品数量`。产品分类仅参考；质量重点是目标设备齐全、选型参数完整、不混入其他设备参数、数量和关系正确。机柜与布线不抽取，纯品牌准入不单独抽为 general；连续表格两行不因此成为 separate。完整口径见 [business-rules.md](.opencode/skills/term-extract/references/business-rules.md)。
 
-原有交互式 `prepare / read / checkpoint / search / validate / commit` 继续可用，适合逐步查看和核验原文。每次正式提交须提供简体中文复盘：最多三条有标签证据的可迁移观察，或明确说明本篇没有新经验。字段见[经验维护说明](.opencode/skills/term-extract/references/experience.md)。
+`prepare / read / checkpoint / search / validate / commit` 是正常自主抽取工具链。正式提交附简体中文复盘：最多三条有证据的可迁移观察，或没有新经验的原因。演示 `demo_tags` 仅工作副本可用，不能用于生产提交或可信学习。仓库不提供真实标书、标签、私有库或运行报告。
 
-演示可显式请求 `demo_tags`，只在工作副本生成定位，不能作为生产提交或可信学习案例。仓库不提供真实标书、正确标签、私有数据库或运行报告。
+## 经验如何学习、验证和消费
 
-## 经验如何生效和消费
+经验存私有 SQLite，不训练模型。无标签自检只产生观察；有可信标签可对照错误和正确处理方法总结候选。确定重复合并来源，疑似冲突进入待办；保存候选不等于生效。
 
-经验保存在私有 SQLite，不训练模型。新增观察形成候选，重复内容合并来源，疑似冲突进入待办。自动运行器用可信标签比较真实 baseline/candidate 输出，检查学习目标、独立回归和反例；满足门槛且开启自动发布后更新正式集合。
+主代理自行选 development、独立 regression 和触及适用／排除边界的 counterexample，准备 baseline/candidate 票号，用原生 task 创建独立 `term-trial` 子会话。每票只得到原文、静态规则和冻结经验包，使用限定工具自主读取并提交；不传标签、历史答案或父会话复盘。
 
-纯成功案例可证明本次未退化，不能仅凭它声称提高准确率。案例不足、语义不确定、预算不足或存在冲突时，保存候选并说明下一步；人工无需填写日常实验 manifest。
+全部试验完成后，主代理分页复核局部差异，finalize 读取真实 `opencode export` 校验父子会话、唯一票号提示、模型/变体、工具范围与真实提交，再注册配对实验。`term_learning_trial_finalize` 仅登记评测，主代理看到通过后再调用 `term_learning_trial_publish` 发布；无需人逐条批准。至少三个案例角色、回归与反例两个独立案例族；保留测试不参与归纳或晋级。标签范围不同先判断业务含义，明确硬错误不能被“无害”意见覆盖。
 
-每篇生产任务固定已发布经验快照，按本地关键词、有限繁简和中英别名召回短规则。候选只能显式注入学习实验，每项实验另固定启动时的正式基线。新发布或撤回不改已有生产快照。可写网页服务存活期间会维护冲突检查：候选或口径变化时重扫，否则默认七天一次；可用 `--no-maintenance` 禁用。没有后台监听所有聊天。
+无法确定的局部差异和经验冲突才交给人。网页与 OpenCode 对话写入同一待办，保存真实用户原话；代理不能假装人工确认。回答后回原会话继续，可信标签不再重复逐篇确认。
 
-旧运行的反馈、人工来源确认、离线断言、手动发布和撤回继续兼容，供特殊维护使用。它们与新自动模式的证据来源及门槛不同，详见[经验维护说明](.opencode/skills/term-extract/references/experience.md)和[旧离线回归清单](.opencode/skills/term-extract/references/memory-evaluation.md)。
+每篇固定已发布经验快照，主代理按疑点通过关键词、有限繁简与中英别名召回短规则；候选只明确注入试验。发布、撤回不改变已有快照。可写网页服务存活期间维护冲突检查，候选或口径变更时重扫，否则默认七天一次；`--no-maintenance` 可禁用。不存在监听所有聊天的学习后台。
 
-## 文件与预算
+## 文件与成本边界
 
 | 位置 | 内容 |
 |---|---|
-| `.opencode/skills/term-extract/` | 中文 skill、业务规则、脚本和经验维护协议 |
-| `.opencode/tools/term_learning.ts` | 高层任务、案例导入、待办和对话答复 |
-| `web/memory/` | 本地中文工作台，原生 HTML/CSS/JavaScript |
-| `runs/` | 交互抽取的索引、回执、草稿、报告和结果 |
-| `.term-memory/` | SQLite、案例归档、不可变来源和自动任务工件 |
+| `.opencode/skills/term-extract/` | 中文 Skill、规则与原子脚本 |
+| `.opencode/agents/` | 唯一主代理与限定试验子代理 |
+| `.opencode/tools/` | 文档、提交、记忆、标签学习与试验工具 |
+| `web/memory/` | 本地记忆管理页面 |
+| `runs/` | 自主抽取索引、回执、草稿和结果 |
+| `.term-memory/` | 版本库、可信案例、来源与独立试验工件 |
 
-私有数据默认被 Git 忽略；外置可使用 `TERM_EXTRACT_MEMORY_DIR`，OpenCode 与页面须使用同一路径。自定义目录若位于仓库内，须自行加入忽略。
+默认私有数据被 Git 忽略。外置用 `TERM_EXTRACT_MEMORY_DIR`，OpenCode 与网页须一致；自定义仓库内目录需另加入忽略。
 
-高层任务可限制调用次数、累计模型时间、单次超时、提示字节和回归案例数，并记录服务返回的 token、费用；未返回的指标显示未记录。完整提示超限会停止，不自动截断标书。字节预算不等于模型窗口，配置关闭会话压缩也不会扩大上下文。
+模型调用和资源由 OpenCode 会话管理，没有旧网页运行器预算配置。三个案例的 A/B 至少六个子会话，不含首次主代理盲抽，还需主代理比较与复盘；应按可接受成本限制验证规模。长文本仍受所选模型窗口约束，关闭会话压缩不会扩大窗口。实际用量缺失不能按零费用计算。
 
-## 检查
+旧反馈、人工来源确认、离线断言、手动发布与撤回继续兼容；旧断言不生成模型输出，不能代替新独立试验门槛。详见[旧维护说明](.opencode/skills/term-extract/references/experience.md)。
 
-可选 Node 工具链检查需要 Node.js 24+；日常 OpenCode 不需另装 Node.js：
+## 软件检查与效果评估
+
+可选工具链检查需要 Node.js 24+：
 
 ```powershell
 npm ci --prefix .opencode
@@ -100,12 +110,12 @@ node tests/memory_tools_smoke.mjs
 node tests/learning_tools_smoke.mjs
 ```
 
-只检查真实文件的解析与工具链，不调用模型：
+只检查真实文件解析与工具链、不调模型：
 
 ```powershell
 node tests/structured_json_smoke.mjs 'D:\私有数据\structured_json'
 ```
 
-合成测试验证流程、定位和准入边界，不代表真实抽取准确率或已证明成本收益。真实效果需使用独立标注案例比较漏产品、参数遗漏、参数污染、数量、关系、调用成本和人工纠错时间。
+软件测试验证工具边界、定位、来源与准入逻辑，不代表真实标书准确率或成本收益。真实效果需用独立标注集比较漏产品、参数遗漏、污染、数量、关系、模型调用与人工纠错时间。
 
 OpenCode 规范：[Skills](https://opencode.ai/docs/skills/)、[Custom Tools](https://opencode.ai/docs/custom-tools/)、[Agents](https://opencode.ai/docs/agents/)。

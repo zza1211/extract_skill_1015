@@ -1920,6 +1920,10 @@ code,
 .evolution-form .check-field { display:flex; gap:10px; align-items:flex-start; font-size:13px; line-height:1.7; }
 .evolution-form .check-field input { margin-top:5px; }
 .record-card [data-evolution-id] { overflow-wrap:anywhere; }
+.evolution-guide { display:grid; gap:20px; }
+.evolution-prompt { display:grid; gap:10px; }
+.evolution-prompt h3 { margin:0; font-size:15px; }
+.prompt-text { width:100%; min-width:0; box-sizing:border-box; padding:12px; border:1px solid #dce5df; border-radius:8px; resize:vertical; background:#f6faf7; font:13px/1.8 ui-monospace,Consolas,monospace; color:#263e34; }
 .badge.needs_review, .badge.needs_examples, .badge.budget_exhausted { background:#fff2de; color:#865a12; }
 .badge.running { background:#e7effa; color:#315880; }
 .badge.completed, .badge.resolved { background:#e4f2e9; color:#2b6845; }

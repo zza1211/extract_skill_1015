@@ -1,8 +1,8 @@
-# 经验复盘、反馈与发布（0.5.0）
+# 经验复盘、反馈与发布（0.6.0）
 
-0.5.0 主流程为“纯条款抽取／标签学习 → 候选 → 可信标签对照与独立实验 → 自动发布或局部人工待办”。高层入口是 `term_learning_create / start / status`，网页提供同等任务入口。标签学习先隔离盲抽再比较；用户已按当前口径确认的可信标签不重复执行旧来源确认。详见[两种模式](learning-modes.md)和[完整演进方案](../../../../docs/learning-evolution.md)。
+0.6.0 统一由 OpenCode term-extractor 主 agent 自主编排抽取与学习，网页仅管理记忆。标签学习使用 begin 登记、正常抽取与 commit、compare 冻结预测后揭示标签，再 judge/reflect；独立验证由主 agent 调用原生 task 的 term-trial 子 agent，finalize 通过后调用 publish。Python 只提供原子工具，不调模型、不自动排后续步骤。可信标签不重复执行旧来源确认。详见[两种模式](learning-modes.md)和[完整演进方案](../../../../docs/learning-evolution.md)。
 
-下文保留原有 `reflection_json`、反馈、人工来源确认、curator、离线断言与手动发布协议，供交互式抽取和历史记录兼容使用。这条旧维护路径的离线评测不生成模型输出；新高层自动实验会实际运行模型、保存原始事件并重新比较。两者共用存储、修订和发布集合，不能混淆证据门槛。
+下文保留正常抽取所需的 `reflection_json` 字段，以及旧反馈、人工来源确认、curator、离线断言与手动发布协议。旧离线评测不生成模型输出；新独立实验核对原生 OpenCode 子会话的工具调用与冻结结果。两者共用存储、修订和发布集合，不能混淆证据门槛。
 
 维护者可以使用[本地工作台](../../../../docs/memory-dashboard.md)查看规则、来源、修订和生效原因。网页“待确认事项”和对话 `term_learning_reply` 共用同一条局部答复记录，不能把局部同意扩大成整篇验收或全局业务口径。
 
@@ -161,6 +161,6 @@ python -X utf8 $memoryScript --project-root . withdraw --memory-id '经验编号
 
 ## 权限与能力边界
 
-extractor 仅开放 recall、feedback、reflect；curator 可读指定来源/修订、propose、evaluate、reflect。两者均无来源确认、导入纠错、发布、撤回、shell 或编辑权限。实际本地访问控制由操作系统承担，哈希用于一致性与追溯，不是管理员防篡改签名。
+term-extractor 主 agent 可调用当前学习原子工具，并仅通过 task 启动 term-trial 独立子 agent；子 agent 只访问本票工具。标签对照、独立验证和发布遵守 learning-modes.md 的新门槛。旧 curator 仅兼容指定来源、修订及离线断言，不批准新经验。agent 不使用人工确认接口、shell 或编辑权限绕过门槛。实际本地访问控制由操作系统承担，哈希用于一致性与追溯，不是管理员防篡改签名。
 
-当前已实现持久化、快照、回执、主动复盘与离线门槛；没有后台监听、自动实验运行器、全面语义验收或真实效果验证。日常结构通过、人工确认案例、评测通过、规则发布应分别表述，不能混为“已学习且证明有效”。
+当前已实现持久化、快照、回执、主动复盘及主 agent 编排的独立试验；Python 不提供模型调度或后台聊天监听。日常结构通过、可信标签、评测通过、经验发布分别记录；没有全面语义验收或真实标书效果保证，不能把流程跑通等同于质量提升。

@@ -11,6 +11,8 @@ import memory_store as store
 
 
 def dispatch(root, action, body):
+    if action in {"create", "start", "settings"}:
+        raise store.MemoryError(runner.RETIRED)
     if action == "create":
         return runner.create_job(root, **body)
     if action == "start":

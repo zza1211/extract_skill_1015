@@ -123,6 +123,8 @@ def register_run(root: Path, index_path: Path, result_path: Path, evidence_path:
     result = store._read_json(Path(result_path), 2 * 1024 * 1024)
     evidence = store._read_json(Path(evidence_path), 2 * 1024 * 1024)
     run = store._read_json(Path(run_path))
+    if isinstance(run, dict) and run.get("trial_only") is True:
+        raise MemoryError("独立试验结果不能登记为学习来源。")
     from validate_result import validate_result
     validation = validate_result(index, result, evidence)
     if not validation["ok"] or not isinstance(evidence, dict) or evidence.get("unresolved"):
@@ -134,7 +136,7 @@ def register_run(root: Path, index_path: Path, result_path: Path, evidence_path:
     for field, file in (("result_sha256", result_path), ("evidence_sha256", evidence_path)):
         if field in run and run[field] != store._file_hash(Path(file)):
             raise MemoryError("提交结果/证据文件与 run 哈希不一致。")
-    generation = {field: run[field] for field in ("model_id", "skill_version", "skill_sha256", "reference_sha256", "memory") if field in run}
+    generation = {field: run[field] for field in ("model_id", "skill_version", "skill_sha256", "reference_sha256", "memory", "execution_context") if field in run}
     key = store._hash([fingerprint, store._hash(result), store._hash(evidence), generation])
     run_id = "run_" + key[:32]
     # run.json 的 learning 摘要会在登记后更新，不参与身份或外部漂移检查。

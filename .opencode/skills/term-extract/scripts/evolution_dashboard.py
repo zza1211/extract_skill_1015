@@ -1,4 +1,4 @@
-"""两种学习模式的本地工作台接口。模型任务显式启动，GET 不写库。"""
+"""记忆管理页面接口：读学习记录、管理案例与待办，不启动模型执行。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,15 +8,20 @@ import memory_store as store
 
 def get(root: Path, parts: list[str], query: dict):
     if parts[:2] == ["api", "learning"]:
-        import learning_runner as runner
         import evolution_store as evolution
-        if parts == ["api", "learning", "settings"]:
-            return runner.get_settings(root)
-        if parts == ["api", "learning", "models"]:
-            return runner.list_models(root)
+        if len(parts) >= 3 and parts[2] in {"settings", "models"}:
+            raise store.MemoryError("模型由 OpenCode 会话选择和管理；网页只管理记忆，不提供模型设置。")
+        if parts == ["api", "learning", "studies"]:
+            import agent_learning
+            return agent_learning.list_studies(root)
+        if len(parts) == 4 and parts[2] == "studies":
+            import agent_learning
+            return agent_learning.get_study(root, parts[3])
         if parts == ["api", "learning", "jobs"]:
+            import learning_runner as runner
             return runner.list_jobs(root)
         if len(parts) == 4 and parts[2] == "jobs":
+            import learning_runner as runner
             return runner.get_job(root, parts[3])
         if parts == ["api", "learning", "cases"]:
             value = evolution.list_cases(root)
@@ -35,17 +40,9 @@ def get(root: Path, parts: list[str], query: dict):
 
 def post(root: Path, parts: list[str], body: dict):
     if parts[:2] == ["api", "learning"]:
-        import learning_runner as runner
         import evolution_store as evolution
-        if parts == ["api", "learning", "settings"]:
-            return runner.save_settings(root, body.get("settings", {}))
-        if parts == ["api", "learning", "jobs"]:
-            allowed = {"mode", "input_path", "labels_path", "family_id", "split", "declared_by", "auto_evolve"}
-            if set(body) - allowed:
-                raise store.MemoryError("任务包含未知字段。")
-            return runner.create_job(root, **body)
-        if len(parts) == 5 and parts[2] == "jobs" and parts[4] == "start":
-            return runner.start_job(root, parts[3])
+        if len(parts) >= 3 and parts[2] in {"jobs", "settings", "models", "studies"}:
+            raise store.MemoryError("网页不创建、启动或继续抽取任务，也不修改模型配置。请在 OpenCode 中加载 term-extract 技能执行；本页仅展示记录和管理记忆。")
         if parts == ["api", "learning", "cases"]:
             allowed = {"input_path", "labels_path", "family_id", "split", "declared_by", "note"}
             if set(body) - allowed:

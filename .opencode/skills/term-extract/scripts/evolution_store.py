@@ -451,11 +451,16 @@ def auto_promote(root, evaluation_id):
                          "system:auto-evolution", "自动实验通过：可信标签、独立回归与反例均满足准入；保留审计及撤回能力。")
 
 
-def _check_provenance(artifact, *, phase, candidate, generation, base_release, expected_source=None, expected_memories=None, expected_policy=None):
+def _check_provenance(artifact, *, phase, candidate, generation, base_release, expected_source=None, expected_memories=None, expected_policy=None, root=None):
     """结果必须能从同一真实会话的事件重新解析，不能仅上传一个通过声明。"""
     if not isinstance(artifact, dict) or not isinstance(artifact.get("provenance"), dict):
         raise MemoryError("实验结果缺少运行来源。")
     provenance = artifact["provenance"]
+    if provenance.get("kind") == "opencode_agent":
+        from agent_trials import check_provenance
+        return check_provenance(artifact, phase=phase, candidate=candidate, generation=generation,
+                                base_release=base_release, expected_source=expected_source,
+                                expected_memories=expected_memories, expected_policy=expected_policy, root=root)
     if provenance.get("kind") != "opencode":
         raise MemoryError("自动晋级仅接受真实 OpenCode 运行；fake/外部结果不能冒充实验。")
     from learning_runner import extract_event_output
@@ -595,6 +600,11 @@ def _register_experiment(root, memory_id, revision, record):
         cases = record.get("cases")
         if not isinstance(cases, list) or not cases:
             raise MemoryError("实验 cases 必须为非空数组。")
+        if any(not isinstance(item, dict) or item.get("role") not in {"development", "regression", "counterexample"} for item in cases):
+            raise MemoryError("实验角色只能为 development/regression/counterexample。")
+        # 未标注观察来源本身可能没有 family；所选可信开发目标也属于归纳族。
+        source_families |= {_case(connection, item.get("case_id"))["family_id"] for item in cases if item["role"] == "development"}
+        target_hashes = {_case(connection, item.get("case_id"))["source_sha256"] for item in cases if item["role"] == "development"}
         evaluated, blockers, seen_hashes = [], [], set()
         summary = {"fix_improvements": 0, "success_cases": 0, "regressions": 0,
                    "independent_regression_cases": 0, "counterexample_cases": 0, "unfixed_target_cases": 0}
@@ -623,6 +633,9 @@ def _register_experiment(root, memory_id, revision, record):
             comparisons = {}
             baseline_provenance = case.get("baseline", {}).get("provenance", {})
             baseline_memories = base_entries
+            if baseline_provenance.get("kind") == "opencode_agent":
+                from agent_trials import baseline_memories as agent_baseline_memories
+                baseline_memories = agent_baseline_memories(root, baseline_provenance)
             if baseline_provenance.get("prompt_path"):
                 baseline_prompt = store._read_json(Path(baseline_provenance["prompt_path"]), 8 * 1024 * 1024)
                 baseline_memories = baseline_prompt.get("memories")
@@ -636,7 +649,7 @@ def _register_experiment(root, memory_id, revision, record):
                 result, runtime_artifacts = _check_provenance(case[phase], phase=phase, candidate=candidate, generation=generation,
                                                             base_release=current_release, expected_source=index["source_document"],
                                                             expected_memories=([entry for entry in baseline_memories if entry["memory_id"] != memory_id] + injected if phase == "candidate" else baseline_memories),
-                                                            expected_policy=expected_policy)
+                                                            expected_policy=expected_policy, root=root)
                 artifacts.extend(runtime_artifacts)
                 comparison = compare_results(index, result, labels)
                 judge = case.get(phase + "_judge")
@@ -646,7 +659,7 @@ def _register_experiment(root, memory_id, revision, record):
                             or judge.get("labels_sha256") != comparison["labels_sha256"]):
                         raise MemoryError("局部语义复核未绑定本次预测和标签。")
                     judge_result, judge_artifacts = _check_provenance(judge, phase="judge", candidate=candidate,
-                                                                    generation=generation, base_release=current_release)
+                                                                    generation=generation, base_release=current_release, root=root)
                     if not isinstance(judge_result, dict) or judge_result.get("judgments") != judge.get("judgments"):
                         raise MemoryError("局部语义判断与实际模型事件输出不一致。")
                     artifacts.extend(judge_artifacts)
@@ -690,6 +703,8 @@ def _register_experiment(root, memory_id, revision, record):
                               "baseline_comparison": before, "candidate_comparison": after})
         if target_count < 1 or summary["independent_regression_cases"] < 1 or summary["counterexample_cases"] < 1 or len(independent_families) < 2:
             blockers.append({"code": "coverage_insufficient", "message": "至少需要开发目标、独立回归和独立反例；回归与反例来自两个独立 family。"})
+        if not source_hashes <= target_hashes:
+            blockers.append({"code": "development_sources_incomplete", "message": "开发目标必须覆盖该候选的全部归纳来源。"})
         for review in _rows(connection, "evoz_reviews"):
             subject = review.get("subject", {})
             if subject.get("memory_id") == memory_id and subject.get("revision") == revision:

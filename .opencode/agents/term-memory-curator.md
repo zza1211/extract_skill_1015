@@ -1,6 +1,6 @@
 ---
-description: 根据运行复盘、用户反馈和人工确认来源整理候选经验，并对给定抽取输出执行回归；不确认来源或批准发布。
-mode: primary
+description: 兼容旧版人工维护来源和离线断言的辅助agent；日常抽取与学习统一使用term-extractor。
+mode: subagent
 permission:
   skill:
     term-extract: allow

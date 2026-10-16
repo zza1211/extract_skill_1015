@@ -14,7 +14,7 @@ import memory_store as store
 
 MemoryError = store.MemoryError
 POLICY = Path(".opencode/skills/term-extract/references/business-rules.md")
-NOTICE = "纯抽取保留观察；标签学习先盲抽再比较，验证通过的经验自动发布。人工主要处理待确认事项。"
+NOTICE = "经验可通过独立评测自动发布，也可由人工审核指定版本后发布。人工批准规则不代表整篇抽取结果成为正确标签。"
 
 
 def _has(connection, table):
@@ -74,7 +74,9 @@ class DashboardService:
                 items.append({"memory_id": mid, "title": payload["title"], "issue_type": payload["issue_type"],
                               "state": memory["state"], "latest_revision": memory["revision"],
                               "active_revision": active["revision"] if active else None, "created_at": memory["created_at"],
-                              "rule_preview": payload["rule"][:180], "source_count": len(payload["correction_ids"]) + len(payload.get("source_ids", []))})
+                              "rule_preview": payload["rule"][:180], "source_count": len(payload["correction_ids"]) + len(payload.get("source_ids", [])),
+                              "publication": store.publication_info(connection, mid, memory["revision"]),
+                              "active_publication": store.publication_info(connection, mid, active["revision"]) if active else None})
             except (ValueError, KeyError, TypeError) as exc:
                 items.append({"memory_id": mid, "title": "记录不可读", "issue_type": "", "state": "error",
                               "latest_revision": row["revision"], "active_revision": None, "created_at": row["created_at"],
@@ -234,7 +236,9 @@ class DashboardService:
         for row in _rows(connection, "audit", "WHERE memory_id=? ORDER BY created_at DESC", (memory_id,)):
             try:
                 record = store._parse(row["record_json"])
-                audit.append({"action": row["action"], "created_at": row["created_at"], "reviewer": record.get("reviewer", ""), "note": record.get("note", "")})
+                audit.append({"action": row["action"], "created_at": row["created_at"], "reviewer": record.get("reviewer", ""), "note": record.get("note", ""),
+                              "basis": record.get("publication_basis", record.get("basis", "human_review" if record.get("approval_id") else "evaluated" if row["action"] == "publish" else None)),
+                              "approval_id": record.get("approval_id"), "evaluation_id": record.get("evaluation_id")})
             except ValueError as exc:
                 audit.append({"action": row["action"], "created_at": row["created_at"], "reviewer": "", "note": "", "error": str(exc)})
         changes = []
@@ -245,9 +249,14 @@ class DashboardService:
                 changes = [{"field": key, "before": before.get(key), "after": payload.get(key)} for key in sorted(set(before) | set(payload)) if before.get(key) != payload.get(key)]
             except ValueError:
                 changes = [{"field": "旧修订不可读", "before": None, "after": None}]
+        manual = store.manual_publish_status(connection, self.root, memory_id, selected)
         return {"memory": memory, "versions": versions, "active_revision": active_revision, "sources": sources,
                 "evaluations": evaluations, "audit": audit, "changes": changes, "blockers": blockers,
                 "can_publish": usable is not None and not blockers, "publish_evaluation_id": usable["evaluation_id"] if usable else None,
+                "can_manual_publish": manual["can_publish"], "manual_publish_blockers": manual["blockers"],
+                "manual_publish_warnings": manual.get("warnings", []),
+                "publication": store.publication_info(connection, memory_id, selected),
+                "active_publication": store.publication_info(connection, memory_id, active_revision) if active_revision else None,
                 "can_withdraw": active_revision is not None}
 
     def _run_detail(self, connection, run_id):
@@ -387,8 +396,12 @@ class DashboardService:
         for row in _rows(connection, "audit"):
             try:
                 record = store._parse(row["record_json"])
-                items.append({"kind": row["action"], "title": "经验发布" if row["action"] == "publish" else "经验撤回",
-                              "summary": record.get("note", ""), "memory_id": row["memory_id"], "revision": row["revision"], "created_at": row["created_at"]})
+                basis = record.get("publication_basis", record.get("basis", "human_review" if record.get("approval_id") else "evaluated"))
+                published = row["action"] in {"publish", "manual_publish"}
+                items.append({"kind": row["action"], "title": "人工审核发布" if published and basis == "human_review" else "评测通过后发布" if published else "经验撤回",
+                              "summary": record.get("note", ""), "memory_id": row["memory_id"], "revision": row["revision"],
+                              "publication_basis": basis if published else None, "approval_id": record.get("approval_id"),
+                              "evaluation_id": record.get("evaluation_id"), "created_at": row["created_at"]})
             except (ValueError, KeyError, TypeError):
                 continue
         for row in _rows(connection, "evaluations"):
@@ -502,6 +515,13 @@ class DashboardService:
             report = memory_evaluate.evaluate_manifest(self.root, store._string(body.get("memory_id"), "memory_id", 128),
                         store._integer(body.get("revision"), "revision"), manifest.resolve())
             return {key: report[key] for key in ("evaluation_id", "report_sha256", "status", "summary", "evaluation_mode", "notice")}
+        if parts == ["api", "publish-reviewed"]:
+            reviewer, note = _ack(body)
+            content_sha256 = store._string(body.get("content_sha256"), "content_sha256（已审核版本内容摘要）", 64)
+            if not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
+                raise MemoryError("content_sha256 必须为已审核版本的 64 位内容摘要，请刷新后重新审核。")
+            return store.manual_publish(self.root, body.get("memory_id"), body.get("revision"), reviewer, note,
+                                        expected_content_sha256=content_sha256)
         if parts == ["api", "publish"]:
             reviewer, note = _ack(body)
             return store.publish(self.root, body.get("memory_id"), body.get("revision"), body.get("evaluation_id"), reviewer, note)

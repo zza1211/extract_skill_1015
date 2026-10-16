@@ -508,7 +508,7 @@ def publish_experiment(root, experiment_id, caller_context):
             historical, published = {}, None
             for event in connection.execute("SELECT event_id,memory_id,revision,action,record_json,created_at FROM audit ORDER BY rowid"):
                 details = store._parse(event["record_json"])
-                if event["action"] == "publish":
+                if event["action"] in {"publish", "manual_publish"}:
                     historical[event["memory_id"]] = {"memory_id": event["memory_id"], "revision": event["revision"], "content_sha256": details["content_sha256"]}
                 elif event["action"] == "withdraw":
                     historical.pop(event["memory_id"], None)

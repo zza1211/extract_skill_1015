@@ -1,4 +1,4 @@
-# 经验记忆架构（0.6.0）
+# 经验记忆架构（0.6.2）
 
 OpenCode `term-extractor` 是唯一执行入口；Python 原子工具不调模型、不预先编排模型调用。网页管理同一私有记忆库。业务过程见[演进方案](learning-evolution.md)，网页操作见[记忆工作台](memory-dashboard.md)。
 
@@ -27,6 +27,7 @@ OpenCode `term-extractor` 是唯一执行入口；Python 原子工具不调模�
                     → 注册实验 → 门槛通过后发布
 
 网页 → 本机 HTTP → 同一库的查看、案例导入、待办答复、经验维护
+        └─ 人工审核指定修订 → 核对来源/冲突 → 保存审核记录 → 发布
 ```
 
 程序保存和检查事实，代理安排下一步；没有网页后台模型运行器。旧 `learning_runner.py` 只读 0.5.0 历史任务，执行和设置入口已停用并明确报错。
@@ -54,7 +55,7 @@ runs/                     自主抽取的索引、回执、草稿、报告和结
 | 表组 | 保存什么 |
 |---|---|
 | revisions | 规则 payload、修订号与内容摘要 |
-| active | 当前生效修订和评测指针 |
+| active | 当前生效修订及发布依据；评测准入或独立人工审核 |
 | evaluations / used_evaluations / audit | 报告、消费状态和维护审计 |
 | learning_runs / feedback / sources / confirmations / events | 不可变运行、复盘、反馈与旧人工确认 |
 | corrections | 兼容旧人工纠错来源 |
@@ -115,6 +116,8 @@ runs/                     自主抽取的索引、回执、草稿、报告和结
 
 `finalize` 仅核验并登记评测；主代理看到通过后，再调用 `term_learning_trial_publish` 读取本计划绑定的最新 passed 评测发布。达到正确、无已检查退化、无未决冲突、工件与当前口径/发布集合一致，才允许生效。自动发布无需逐条人工批准，证据不足仍保留候选。`success_cases` 可能只是保持原本正确，只有 `fix_improvements` 表示本轮观察到修复，均不能直接证明长期效果。
 
+人工直发另有独立路径：网页或人工 `publish-reviewed` CLI 绑定精确 revision 和内容摘要，核对真实来源工件、当前口径及未决冲突，再保存审核人、理由、时间和 `approval_id`。它不要求整篇来源已确认或先产生评测；不会更新来源确认表、生成可信标签或消费评测报告。发布依据为 `human_review`，`evaluation_id=null`；无评测记录标记 `not_evaluated`，有报告但未采用本次评测准入标记 `not_adopted`。该事实与规则一起保留，不能把人工批准渲染成评测通过。代理无这项人工审核工具。
+
 ## 8. 正式经验怎样消费
 
 每次准备输入固定 `memory_snapshot.json`，绑定 index 和正式集合。规则内容与版本在快照中，历史标书全文不在。
@@ -131,11 +134,11 @@ runs/                     自主抽取的索引、回执、草稿、报告和结
 
 网页答复与 `term_learning_reply` 写入相同待办，保留用户原话、作用范围和审计。代理的 judge 是模型判断，不能包装成用户答复。局部答复不确认整篇、所有经验或全局口径。
 
-网页可导入可信案例、修订候选、撤回和维护旧来源；没有模型设置、创建或继续任务按钮，旧 HTTP 执行入口明确拒绝。模型、调用和子任务由 OpenCode 管理。
+网页可导入可信案例、修订候选、人工审核发布、撤回和维护旧来源；没有模型设置、创建或继续任务按钮，旧 HTTP 执行入口明确拒绝。模型、调用和子任务由 OpenCode 管理。人工审核只批准单条修订，不批准来源整篇输出；未解决的阻塞冲突、来源缺失或变化仍阻止人工发布。
 
 ## 10. 兼容与局限
 
-旧运行反馈、人工来源确认、离线断言、手动发布与撤回继续可用。旧断言评测只检查提供的输出，不生成模型结果；不能据此跳过新自动晋级的独立试验和来源门槛。详见[经验维护说明](../.opencode/skills/term-extract/references/experience.md)与[旧断言清单](../.opencode/skills/term-extract/references/memory-evaluation.md)。
+旧运行反馈、人工来源确认、离线断言、评测后手动发布与撤回继续可用。旧断言评测只检查提供的输出，不生成模型结果；不能据此跳过新自动晋级的独立试验和来源门槛。人工直发使用独立审核依据，不放宽旧 `publish` 的评测验证。撤回后恢复需重新审核或重新验证发布。详见[经验维护说明](../.opencode/skills/term-extract/references/experience.md)与[旧断言清单](../.opencode/skills/term-extract/references/memory-evaluation.md)。
 
 当前不自动保证全部标签可靠、案例族语义独立、反例充分或所有语义冲突被发现。局部摘录可能截断，需要代理继续读取或人工判断；长上下文与总成本仍取决于模型和任务规模。没有旧网页运行器那套自动预算配置，实际调用以 OpenCode 记录为准。
 

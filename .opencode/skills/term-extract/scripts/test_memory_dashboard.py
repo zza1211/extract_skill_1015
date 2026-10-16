@@ -83,6 +83,72 @@ class DashboardTests(unittest.TestCase):
         return {"insights": [{"title": "核验采购清单", "issue_type": "quantity", "triggers": ["采购数量"], "applies_when": "能够确认同一采购对象",
                  "rule": "保留原文单位。", "exclusions": "不同采购对象不合并。", "observation": "本篇数量位于另一段。", "evidence_tags": ["<C2>"]}], "no_experience_reason": ""}
 
+    def test_manual_publish_needs_no_evaluation_or_whole_run_confirmation(self):
+        run = self.run_fixture()
+        candidate = learning.record_reflection(self.root, run["run_id"], self.reflection())["candidates"][0]
+        path = "/api/memories/" + candidate["memory_id"]
+        detail = self.service.get(path, {})
+        self.assertFalse(detail["can_publish"])
+        self.assertTrue(detail["can_manual_publish"], detail)
+        self.assertFalse(detail["sources"][0]["confirmed"])
+        body = {"memory_id": candidate["memory_id"], "revision": candidate["revision"],
+                "content_sha256": candidate["content_sha256"], "reviewer": "合成人工审核人",
+                "note": "仅核对这条规则及适用条件，不认定整篇结果正确", "acknowledged": True}
+        for value in (False, 1, "true", None):
+            with self.assertRaises(store.MemoryError):
+                self.service.post("/api/publish-reviewed", {**body, "acknowledged": value})
+        published = self.service.post("/api/publish-reviewed", body)
+        self.assertEqual(published["state"], "published")
+        detail = self.service.get(path, {})
+        self.assertEqual(detail["publication"]["basis"], "human_review")
+        self.assertEqual(detail["publication"]["reviewer"], body["reviewer"])
+        self.assertEqual(detail["publication"]["evaluation_status"], "not_evaluated")
+        self.assertIsNone(detail["publication"]["evaluation_id"])
+        self.assertTrue(detail["publication"]["approval_id"])
+        self.assertFalse(detail["sources"][0]["confirmed"])
+        self.assertFalse(detail["can_manual_publish"])
+        listing = self.service.get("/api/memories", {})["items"][0]
+        self.assertEqual(listing["active_publication"]["basis"], "human_review")
+        history = self.service.get("/api/history", {})["items"]
+        self.assertTrue(any(item.get("publication_basis") == "human_review" and item["title"] == "人工审核发布" for item in history))
+        with store._db(self.root) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM used_evaluations").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM learning_confirmations").fetchone()[0], 0)
+        self.service.post("/api/withdraw", {"memory_id": candidate["memory_id"], "expected_revision": 1,
+                          "reviewer": body["reviewer"], "note": "合成撤回", "acknowledged": True})
+        self.assertEqual(self.service.get(path, {})["memory"]["state"], "withdrawn")
+        self.assertEqual(store.list_memories(self.root)["memories"][0]["active_revision"], None)
+
+    def test_manual_publish_rechecks_reviewed_content_and_source_integrity(self):
+        candidate = self.service.post("/api/memories", {"payload": self.payload()})
+        body = {"memory_id": candidate["memory_id"], "revision": 1, "reviewer": "合成审核人",
+                "note": "核对规则", "acknowledged": True}
+        for value in (None, "wrong", "a" * 64):
+            with self.assertRaises(store.MemoryError):
+                self.service.post("/api/publish-reviewed", {**body, "content_sha256": value})
+        self.input.write_text("已改变的原始证据", encoding="utf-8")
+        detail = self.service.get("/api/memories/" + candidate["memory_id"], {})
+        self.assertFalse(detail["can_manual_publish"])
+        self.assertTrue(detail["manual_publish_blockers"])
+        with self.assertRaises(store.MemoryError):
+            self.service.post("/api/publish-reviewed", {**body, "content_sha256": candidate["content_sha256"]})
+
+    def test_manual_publication_does_not_hide_failed_evaluation(self):
+        candidate = self.service.post("/api/memories", {"payload": self.payload()})
+        report = self.report(candidate)
+        report["summary"]["regressions"] = 1
+        report["status"] = "failed"
+        failed = store.register_evaluation(self.root, candidate["memory_id"], 1, report)
+        self.service.post("/api/publish-reviewed", {"memory_id": candidate["memory_id"], "revision": 1,
+                          "content_sha256": candidate["content_sha256"], "reviewer": "合成审核人",
+                          "note": "人工核对适用边界后批准，原评测记录仍保留", "acknowledged": True})
+        detail = self.service.get("/api/memories/" + candidate["memory_id"], {})
+        self.assertEqual(detail["publication"]["evaluation_status"], "not_adopted")
+        self.assertIsNone(detail["publication"]["evaluation_id"])
+        self.assertEqual(detail["evaluations"][0]["status"], "failed")
+        self.assertEqual(self.service.get("/api/evaluations/" + failed["evaluation_id"], {})["report"], report)
+
     def test_empty_endpoints_are_read_only_and_policy_does_not_invent_history(self):
         overview = self.service.get("/api/overview", {})
         self.assertEqual(set(overview["counts"].values()), {0})

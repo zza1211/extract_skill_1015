@@ -256,6 +256,20 @@ class AgentTrialTests(unittest.TestCase):
         with store._db(self.root) as connection:
             self.assertIsNone(connection.execute("SELECT 1 FROM active WHERE memory_id=?", (first["memory_id"],)).fetchone())
 
+    def test_publish_retry_preserves_release_with_prior_manual_publication(self):
+        payload = store.load_candidate(self.root, self.candidate["memory_id"], 1)["payload"]
+        payload = {**payload, "title": "合成人工审核的前置规则", "triggers": ["前置规则"]}
+        manual = store.propose(self.root, payload)
+        store.manual_publish(self.root, manual["memory_id"], manual["revision"], "合成审核人", "仅合成测试")
+        self.plan = trials.prepare_experiment(self.root, self.candidate["memory_id"], 1, self.roles, self.controller)
+        self.finish_all()
+        with patch.object(trials, "export_session", side_effect=self.exported):
+            trials.finalize(self.root, self.plan["experiment_id"], self.controller)
+        first = trials.publish_experiment(self.root, self.plan["experiment_id"], self.controller)
+        repeated = trials.publish_experiment(self.root, self.plan["experiment_id"], self.controller)
+        self.assertEqual(first["release_sha256"], repeated["release_sha256"])
+        self.assertTrue(repeated["historical_receipt"])
+
     def test_publish_retry_is_explicit_history_when_policy_later_changes(self):
         self.finish_all()
         with patch.object(trials, "export_session", side_effect=self.exported):

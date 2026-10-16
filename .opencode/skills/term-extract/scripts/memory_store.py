@@ -43,7 +43,12 @@ CREATE TABLE IF NOT EXISTS evaluations (
  report_json TEXT NOT NULL, report_sha256 TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS active (
- memory_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, evaluation_id TEXT NOT NULL
+ memory_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, evaluation_id TEXT, approval_id TEXT,
+ CHECK ((evaluation_id IS NOT NULL AND approval_id IS NULL) OR (evaluation_id IS NULL AND approval_id IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS manual_approvals (
+ approval_id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, revision INTEGER NOT NULL,
+ record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS used_evaluations (evaluation_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS audit (
@@ -139,6 +144,17 @@ def resolve_store_dir(project_root: Path) -> Path:
     return (root / selected).resolve() if not selected.is_absolute() else selected.resolve()
 
 
+def _migrate_active(connection) -> None:
+    """仅迁移活动指针，原评测与历史审计不作任何改写。"""
+    columns = {row[1]: row for row in connection.execute("PRAGMA table_info(active)")}
+    if "approval_id" in columns and not columns["evaluation_id"][3]:
+        return
+    connection.execute("ALTER TABLE active RENAME TO active_before_manual_approval")
+    connection.execute("CREATE TABLE active (memory_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, evaluation_id TEXT, approval_id TEXT, CHECK ((evaluation_id IS NOT NULL AND approval_id IS NULL) OR (evaluation_id IS NULL AND approval_id IS NOT NULL)))")
+    connection.execute("INSERT INTO active(memory_id,revision,evaluation_id,approval_id) SELECT memory_id,revision,evaluation_id,NULL FROM active_before_manual_approval")
+    connection.execute("DROP TABLE active_before_manual_approval")
+
+
 @contextmanager
 def _db(root: Path, *, write: bool = False):
     file = resolve_store_dir(root) / "memory.sqlite3"
@@ -153,11 +169,12 @@ def _db(root: Path, *, write: bool = False):
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(_SCHEMA)
             # 内容表仅允许追加；发布状态用独立活动指针与审计事件表示。
-            for table in ("corrections", "revisions", "evaluations", "audit", "used_evaluations",
+            for table in ("corrections", "revisions", "evaluations", "manual_approvals", "audit", "used_evaluations",
                           "learning_runs", "learning_feedback", "learning_sources", "learning_confirmations", "learning_events"):
                 for operation in ("UPDATE", "DELETE"):
                     connection.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{operation.lower()} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'immutable record'); END")
             connection.execute("BEGIN IMMEDIATE")
+            _migrate_active(connection)
         else:
             connection = sqlite3.connect(file.as_uri() + "?mode=ro", uri=True, timeout=15, isolation_level=None)
             connection.execute("BEGIN")
@@ -231,7 +248,8 @@ def _candidate(connection, memory_id: str, revision: int) -> dict:
         if review_status["blocking"]:
             state = review_status["state"]
     return {"memory_id": memory_id, "revision": revision, "content_sha256": row["content_sha256"],
-            "payload": payload, "state": state, "created_at": row["created_at"]}
+            "payload": payload, "state": state, "created_at": row["created_at"],
+            "publication": publication_info(connection, memory_id, revision)}
 
 
 def _published(connection) -> list[dict]:
@@ -412,6 +430,140 @@ def _audit(connection, memory_id, revision, action, reviewer, note, details) -> 
     return event_id
 
 
+def _approval(connection, approval_id: str) -> dict:
+    row = connection.execute("SELECT * FROM manual_approvals WHERE approval_id=?", (approval_id,)).fetchone()
+    if row is None:
+        raise MemoryError("人工规则审核记录不存在。")
+    record = _parse(row["record_json"])
+    if _hash(record) != row["record_sha256"] or any(record.get(key) != row[key] for key in ("approval_id", "memory_id", "revision", "created_at")):
+        raise MemoryError("人工规则审核记录哈希或身份不一致。")
+    candidate = connection.execute("SELECT content_sha256 FROM revisions WHERE memory_id=? AND revision=?", (record["memory_id"], record["revision"])).fetchone()
+    if candidate is None or candidate["content_sha256"] != record.get("content_sha256"):
+        raise MemoryError("人工规则审核记录未绑定对应修订内容。")
+    return record
+
+
+def publication_info(connection, memory_id: str, revision: int | None = None) -> dict | None:
+    """查询发布依据；历史审计仅按原记录读取，不补写或伪造评测。"""
+    if connection is None:
+        return None
+    active = connection.execute("SELECT * FROM active WHERE memory_id=?", (memory_id,)).fetchone()
+    selected_revision = revision if revision is not None else active["revision"] if active else None
+    if selected_revision is None:
+        return None
+    event = connection.execute("SELECT * FROM audit WHERE memory_id=? AND revision=? AND action IN ('publish','manual_publish') ORDER BY rowid DESC LIMIT 1", (memory_id, selected_revision)).fetchone()
+    if event is None:
+        return None
+    details = _parse(event["record_json"])
+    current = bool(active and active["revision"] == selected_revision)
+    approval_id = details.get("approval_id")
+    if approval_id:
+        record = _approval(connection, approval_id)
+        if record["memory_id"] != memory_id or record["revision"] != selected_revision:
+            raise MemoryError("发布审计引用了其他修订的人工审核。")
+        evaluated = bool(connection.execute("SELECT 1 FROM evaluations WHERE memory_id=? AND revision=? LIMIT 1", (memory_id, selected_revision)).fetchone())
+        return {"basis": "human_review", "reviewer": record["reviewer"], "note": record["note"],
+                "approval_id": approval_id, "evaluation_id": None,
+                "evaluation_status": "not_adopted" if evaluated else "not_evaluated",
+                "created_at": record["created_at"], "current_active": current}
+    evaluation_id = details.get("evaluation_id")
+    if not evaluation_id:
+        raise MemoryError("发布审计缺少评测或人工规则审核依据。")
+    evaluation = _evaluation(connection, evaluation_id)
+    if evaluation["memory_id"] != memory_id or evaluation["revision"] != selected_revision:
+        raise MemoryError("发布审计引用了其他修订的评测。")
+    return {"basis": "evaluated", "reviewer": details.get("reviewer"), "note": details.get("note"),
+            "approval_id": None, "evaluation_id": evaluation_id,
+            "evaluation_status": evaluation["report"]["status"], "created_at": event["created_at"],
+            "current_active": current}
+
+
+def manual_publish_status(connection, root: Path, memory_id: str, revision: int) -> dict:
+    """人工只批准此规则；来源真实完整、修订新鲜度和明确冲突仍是硬门槛。"""
+    blockers, warnings = [], []
+    def add(target, code, message):
+        target.append({"code": code, "message": message})
+    try:
+        memory_id, revision = _string(memory_id, "memory_id", 128), _integer(revision, "revision")
+        candidate = _candidate(connection, memory_id, revision)
+    except MemoryError as exc:
+        add(blockers, "INVALID_CANDIDATE", str(exc))
+        return {"can_publish": False, "blockers": blockers, "warnings": warnings}
+    latest = connection.execute("SELECT MAX(revision) FROM revisions WHERE memory_id=?", (memory_id,)).fetchone()[0]
+    if revision != latest:
+        add(blockers, "STALE_REVISION", "该经验已有更新修订，请刷新并审核最新版本。")
+    if candidate["state"] == "published":
+        add(blockers, "ALREADY_PUBLISHED", "该修订已发布；不要重复发布。")
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evoz_decisions'").fetchone():
+        from evolution_store import _candidate_review_status, policy_digest
+        status = _candidate_review_status(connection, memory_id, revision, policy_digest(root))
+        if status["blocking"]:
+            add(blockers, "BLOCKING_REVIEW", "该候选被拒绝、合并或仍有未解决的冲突/复核事项，请先处理。")
+    payload = candidate["payload"]
+    if not payload["correction_ids"] and not payload.get("source_ids"):
+        add(blockers, "MISSING_SOURCE", "人工审核发布仍需要可追溯的真实来源。")
+    try:
+        from memory_learning import _get_sources
+        regular = {**payload, "source_ids": [sid for sid in payload.get("source_ids", []) if not sid.startswith("case_")]}
+        sources = _get_sources(connection, regular, require_confirmed=False)
+        for source in sources:
+            sid = source["source_id"]
+            if not source.get("confirmed"):
+                add(warnings, "SOURCE_NOT_CONFIRMED", f"来源 {sid} 未被确认为整篇正确；本次只审核规则，不改变来源状态。")
+            if source.get("invalidated"):
+                add(warnings, "SOURCE_HAS_CORRECTION", f"来源 {sid} 的原结果已有人工纠错；请仅批准其中仍成立的规则。")
+            if source.get("kind") == "correction" and not source.get("after_path"):
+                add(warnings, "FEEDBACK_WITHOUT_LABELS", f"反馈来源 {sid} 未提供完整修正结果；本次不会生成正确标签。")
+        for sid in payload.get("source_ids", []):
+            if not sid.startswith("case_"):
+                continue
+            from evolution_store import _case, _check_case, policy_digest
+            case = _case(connection, sid)
+            _check_case(case)
+            if case["split"] != "development":
+                raise MemoryError("回归/保留集标签不能作为经验归纳来源。")
+            if case.get("policy_sha256") != policy_digest(root):
+                add(warnings, "SOURCE_POLICY_CHANGED", f"案例来源 {sid} 的业务口径已变化，请按当前口径审核规则。")
+    except (MemoryError, OSError, KeyError, TypeError) as exc:
+        add(blockers, "INVALID_SOURCE", "来源不存在、不可读取或完整性核验失败：" + str(exc))
+    evaluations = connection.execute("SELECT 1 FROM evaluations WHERE memory_id=? AND revision=? LIMIT 1", (memory_id, revision)).fetchone()
+    add(warnings, "EVALUATION_NOT_ADOPTED" if evaluations else "NOT_EVALUATED",
+        "人工审核发布不采用现有评测结论；请自行核对规则。" if evaluations else "该版本尚未评测；发布依据仅为人工对规则的审核。")
+    return {"can_publish": not blockers, "blockers": blockers, "warnings": warnings}
+
+
+def manual_publish(root: Path, memory_id: str, revision: int, reviewer: str, note: str,
+                   expected_content_sha256: str | None = None) -> dict:
+    """人工批准指定规则版本，独立于自动评测，不确认整篇结果或来源。"""
+    reviewer = _string(reviewer, "reviewer（人工审阅者审计名）", 160)
+    note = _string(note, "规则审核理由", 2000)
+    memory_id, revision = _string(memory_id, "memory_id", 128), _integer(revision, "revision")
+    if expected_content_sha256 is not None and (not isinstance(expected_content_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_content_sha256)):
+        raise MemoryError("expected_content_sha256 必须是审核页面所见规则的 SHA-256。")
+    with _db(root, write=True) as connection:
+        candidate = _candidate(connection, memory_id, revision)
+        if expected_content_sha256 is not None and candidate["content_sha256"] != expected_content_sha256:
+            raise MemoryError("审核内容哈希不一致，请刷新页面重新审核。")
+        status = manual_publish_status(connection, root, memory_id, revision)
+        if not status["can_publish"]:
+            raise MemoryError("；".join(item["message"] for item in status["blockers"]))
+        approval_id, created_at = "approval_" + uuid.uuid4().hex, _now()
+        record = {"approval_id": approval_id, "memory_id": memory_id, "revision": revision,
+                  "content_sha256": candidate["content_sha256"], "basis": "human_review",
+                  "reviewer": reviewer, "note": note, "created_at": created_at,
+                  "scope": "rule_only", "evaluation_id": None, "warnings": status["warnings"]}
+        connection.execute("INSERT INTO manual_approvals VALUES (?,?,?,?,?,?)", (approval_id, memory_id, revision, _canonical(record).decode(), _hash(record), created_at))
+        event_id = _audit(connection, memory_id, revision, "manual_publish", reviewer, note,
+                          {"content_sha256": candidate["content_sha256"], "payload": candidate["payload"],
+                           "basis": "human_review", "approval_id": approval_id, "evaluation_id": None})
+        connection.execute("INSERT INTO active(memory_id,revision,evaluation_id,approval_id) VALUES (?,?,NULL,?) ON CONFLICT(memory_id) DO UPDATE SET revision=excluded.revision,evaluation_id=NULL,approval_id=excluded.approval_id", (memory_id, revision, approval_id))
+        publication = publication_info(connection, memory_id, revision)
+        digest = _release(_published(connection))
+    return {"memory_id": memory_id, "revision": revision, "state": "published", "content_sha256": candidate["content_sha256"],
+            "approval_id": approval_id, "evaluation_id": None, "publication": publication,
+            "release_sha256": digest, "event_id": event_id, "warnings": status["warnings"]}
+
+
 def publish(root: Path, memory_id, revision, evaluation_id, reviewer: str, note: str) -> dict:
     reviewer, note = _string(reviewer, "reviewer（人工审阅者审计名）", 160), _string(note, "发布说明", 2000)
     memory_id, revision = _string(memory_id, "memory_id", 128), _integer(revision, "revision")
@@ -447,7 +599,7 @@ def publish(root: Path, memory_id, revision, evaluation_id, reviewer: str, note:
         event_id = _audit(connection, memory_id, revision, "publish", reviewer, note,
                           {"content_sha256": candidate["content_sha256"], "payload": candidate["payload"],
                            "evaluation_id": evaluation_id, "report_sha256": evaluation["report_sha256"]})
-        connection.execute("INSERT INTO active VALUES (?,?,?) ON CONFLICT(memory_id) DO UPDATE SET revision=excluded.revision,evaluation_id=excluded.evaluation_id", (memory_id, revision, evaluation_id))
+        connection.execute("INSERT INTO active(memory_id,revision,evaluation_id,approval_id) VALUES (?,?,?,NULL) ON CONFLICT(memory_id) DO UPDATE SET revision=excluded.revision,evaluation_id=excluded.evaluation_id,approval_id=NULL", (memory_id, revision, evaluation_id))
         connection.execute("INSERT INTO used_evaluations VALUES (?)", (evaluation_id,))
         digest = _release(_published(connection))
     return {"memory_id": memory_id, "revision": revision, "state": "published", "content_sha256": candidate["content_sha256"], "evaluation_id": evaluation_id, "report_sha256": evaluation["report_sha256"], "release_sha256": digest, "event_id": event_id}
@@ -478,7 +630,9 @@ def list_memories(root: Path) -> dict:
                 latest = _candidate(connection, row["memory_id"], row["revision"])
                 active = next((item for item in entries if item["memory_id"] == row["memory_id"]), None)
                 result.append({"memory_id": row["memory_id"], "latest_revision": row["revision"], "active_revision": active["revision"] if active else None,
-                               "state": latest["state"], "title": latest["payload"]["title"], "issue_type": latest["payload"]["issue_type"], "content_sha256": latest["content_sha256"]})
+                               "state": latest["state"], "title": latest["payload"]["title"], "issue_type": latest["payload"]["issue_type"], "content_sha256": latest["content_sha256"],
+                               "publication": latest["publication"],
+                               "active_publication": publication_info(connection, row["memory_id"])})
         return {"memories": result, "release_sha256": _release(entries)}
 
 
@@ -694,6 +848,10 @@ def main(argv=None) -> int:
         for name in ("memory-id", "evaluation-id", "reviewer", "note"):
             action.add_argument("--" + name, required=True)
         action.add_argument("--revision", required=True, type=int)
+        action = sub.add_parser("publish-reviewed")
+        for name in ("memory-id", "reviewer", "note", "content-sha256"):
+            action.add_argument("--" + name, required=True)
+        action.add_argument("--revision", required=True, type=int)
         action = sub.add_parser("withdraw")
         for name in ("memory-id", "reviewer", "note"):
             action.add_argument("--" + name, required=True)
@@ -726,6 +884,8 @@ def main(argv=None) -> int:
                 result = _evaluation(connection, args.evaluation_id)
         elif args.command == "publish":
             result = publish(root, args.memory_id, args.revision, args.evaluation_id, args.reviewer, args.note)
+        elif args.command == "publish-reviewed":
+            result = manual_publish(root, args.memory_id, args.revision, args.reviewer, args.note, args.content_sha256)
         elif args.command == "withdraw":
             result = withdraw(root, args.memory_id, args.reviewer, args.note)
         elif args.command == "create-snapshot":

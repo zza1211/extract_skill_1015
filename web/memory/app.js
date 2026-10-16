@@ -62,6 +62,31 @@ function button(
 function badge(value, text) {
   return el("span", `badge ${value}`, text || labels[value] || value);
 }
+function publicationLabel(publication) {
+  if (!publication) return "发布依据未记录";
+  if (publication.basis === "human_review")
+    return publication.evaluation_status === "not_adopted"
+      ? "人工审核发布 / 未采用评测准入"
+      : "人工审核发布 / 未评测";
+  return "评测通过后发布";
+}
+function publicationView(publication, title = "此版本的发布依据") {
+  if (!publication) return null;
+  const root = el("section", "publication-record", null,
+    el("h3", "field-label", title),
+    badge(publication.basis, publicationLabel(publication)),
+    metadata({
+      审核人: publication.reviewer || "未记录",
+      发布说明: publication.note || "未记录",
+      发布时间: date(publication.created_at),
+    }),
+  );
+  if (publication.approval_id)
+    root.append(el("p", "inline-note mono", `人工审核记录：${publication.approval_id}`));
+  if (publication.evaluation_id)
+    root.append(button("查看发布采用的评测报告", () => openEvaluation(publication.evaluation_id), "text-button"));
+  return root;
+}
 function pretty(value) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
@@ -178,7 +203,7 @@ async function overview() {
       el(
         "p",
         null,
-        "观察 → 候选 → 标签验证与独立回归 → 自动发布。没有标签或验证案例不足时保留候选，疑点进入待确认事项。",
+        "候选有两条发布路径：Agent 经标签验证与独立回归后发布；人工审阅具体规则后可直接发布，无需先完成评测。疑点仍可进入待确认事项。",
       ),
     ),
   );
@@ -287,6 +312,7 @@ function card(item) {
         feedback: "用户反馈",
         confirmation: "来源确认",
         publish: "发布",
+        manual_publish: "人工审核发布",
         withdraw: "撤回",
         run: "抽取运行",
         evaluation: "离线评测",
@@ -326,9 +352,13 @@ function card(item) {
       el(
         "p",
         "record-active",
-        `当前生效 v${item.active_revision}${item.active_revision !== item.latest_revision ? " · 新候选待验证" : ""}`,
+        `当前生效 v${item.active_revision}${item.active_revision !== item.latest_revision ? " · 新候选未发布" : ""}`,
       ),
     );
+  if (state.section === "memories" && item.active_publication)
+    n.append(el("p", "record-publication", publicationLabel(item.active_publication)));
+  if (state.section === "history" && ["publish", "manual_publish"].includes(item.kind))
+    n.append(el("p", "record-publication", item.publication_basis === "human_review" ? "人工审核发布" : "评测通过后发布"));
   return n;
 }
 async function loadList(append = false) {
@@ -563,7 +593,13 @@ function memoryView(d) {
         state.tab = "sources";
         $("detail-panel").replaceChildren(memoryView(d));
       }),
-      button("评测与发布", () => {
+      button(
+        "人工审核发布此版本",
+        () => reviewAction("publish-reviewed", d),
+        "button small",
+        state.readOnly || !d.can_manual_publish,
+      ),
+      button("发布与评测", () => {
         state.tab = "evaluation";
         $("detail-panel").replaceChildren(memoryView(d));
       }),
@@ -576,7 +612,7 @@ function memoryView(d) {
         `当前生效 v${d.active_revision}`,
         d.active_revision !== m.revision
           ? `当前查看 v${m.revision}。新修订尚未发布时，后续新任务仍使用 v${d.active_revision}。`
-          : "该版本可被之后新注册的任务按需召回；已注册任务仍保留原快照。",
+          : `该版本可被之后新注册的任务按需召回；已注册任务仍保留原快照。${d.active_publication ? "\n" + publicationLabel(d.active_publication) : ""}`,
         "success",
       ),
     );
@@ -584,16 +620,17 @@ function memoryView(d) {
     root.append(
       note(
         "尚未生效",
-        d.blockers.map((b) => b.message).join("\n") ||
-          "该经验没有当前发布版。完成来源核验、离线评测和人工发布后才可用于新任务。",
+        "该经验没有当前发布版。可由人工审阅此规则后直接发布，或经过标签验证与独立回归后发布。保存候选不会使其生效。",
       ),
     );
+  if (d.active_revision && d.active_revision !== m.revision && d.active_publication)
+    root.append(publicationView(d.active_publication, `当前生效 v${d.active_revision} 的发布依据`));
   const tabs = el("div", "tabs");
   for (const [key, text] of [
     ["rule", "规则正文"],
     ["sources", `来源 (${d.sources.length})`],
     ["changes", "修订差异"],
-    ["evaluation", "评测与发布"],
+    ["evaluation", "发布与评测"],
   ])
     tabs.append(
       button(
@@ -625,20 +662,19 @@ function memoryView(d) {
         ),
       ),
       metadata({ 创建时间: date(m.created_at), 内容摘要: m.content_sha256 }),
-      note(
-        "下一步",
-        d.can_publish
-          ? "已有可用评测。请审阅来源、规则边界和报告，再由维护者发布。"
-          : d.blockers.map((b) => b.message).join("\n") ||
-              "已发布，无需重复发布。",
-      ),
+      ...(d.publication ? [publicationView(d.publication)] : []),
+      note("下一步", d.can_manual_publish
+        ? "审阅规则、适用前提、排除情况和来源后，可直接人工审核发布此版本。此操作只批准规则，不会将整篇抽取结果标成正确标签。"
+        : d.publication && d.active_revision === m.revision
+          ? "此版本已生效。需要修正规则时请编辑为新修订，或撤回当前生效版本。"
+          : (d.manual_publish_blockers || []).map((b) => b.message).join("\n") || "请在“发布与评测”中查看此版本的发布条件。"),
     );
   } else if (state.tab === "sources") {
     if (!d.sources.length)
       content.append(
         note(
           "缺少来源",
-          "编辑候选并关联本次运行或纠错反馈。来源必须真实，发布前需要人工核验。",
+          "编辑候选并关联本次运行或纠错反馈。来源必须真实。人工审核发布审阅的是规则，不要求先确认整篇抽取结果正确。",
         ),
       );
     for (const s of d.sources) {
@@ -666,7 +702,7 @@ function memoryView(d) {
           s.error ||
             s.feedback_text ||
             (s.kind === "success"
-              ? "运行结果作为成功来源，须核对全文和结果后确认。"
+              ? "此运行提供经验观察。若将整篇结果作为可信评测依据，才需核对全文后确认；人工发布规则不要求确认整篇。"
               : "反馈修正结果作为纠错来源。"),
         ),
         button("查看依据与核验", () => openSource(s.source_id), "text-button"),
@@ -678,7 +714,7 @@ function memoryView(d) {
       content.append(
         note(
           "首次修订",
-          "没有更早的规则正文可比较。本次仅保存候选，还未发布。",
+          "没有更早的规则正文可比较。此版本是否生效及发布依据见上方。",
         ),
       );
     for (const c of d.changes) {
@@ -731,7 +767,7 @@ function memoryView(d) {
           el(
             "h3",
             "event-kind",
-            `${a.action === "publish" ? "发布" : "撤回"} · ${date(a.created_at)}`,
+            `${a.action === "manual_publish" || (a.action === "publish" && a.basis === "human_review") ? "人工审核发布" : a.action === "publish" ? "评测通过后发布" : "撤回"} · ${date(a.created_at)}`,
           ),
           el("p", null, `${a.reviewer}：${a.note}`),
         ),
@@ -744,9 +780,24 @@ function memoryView(d) {
 }
 function evaluationView(d) {
   const root = el("div");
+  if (d.publication) root.append(publicationView(d.publication));
+  const manual = el("section", "publication-route human-route", null,
+    el("h3", null, "人工审核发布"),
+    el("p", null, "你可以审阅并批准这个具体版本，无需先评测。批准范围仅为这条经验规则，不会确认整篇抽取结果或将其导入正确标签。"),
+  );
+  if ((d.manual_publish_blockers || []).length)
+    manual.append(note("人工发布的阻断项", d.manual_publish_blockers.map((b) => "• " + b.message).join("\n")));
+  if ((d.manual_publish_warnings || []).length)
+    manual.append(note("审核时留意", d.manual_publish_warnings.map((b) => "• " + (b.message || b)).join("\n") + "\n这些提醒不要求你先确认整篇结果；请判断是否影响这条规则。"));
+  manual.append(button("人工审核发布此版本", () => reviewAction("publish-reviewed", d), "button", state.readOnly || !d.can_manual_publish));
+  root.append(manual);
+  const evaluated = el("section", "publication-route evaluated-route", null,
+    el("h3", null, "评测通过后发布"),
+    el("p", null, "此路径保留原有来源核验、独立评测和发布门槛。以下未完成事项仅限制评测发布，不限制上方的人工审核发布。"),
+  );
   if (d.blockers.length)
-    root.append(
-      note("未完成事项", d.blockers.map((b) => "• " + b.message).join("\n")),
+    evaluated.append(
+      note("评测发布所需条件", d.blockers.map((b) => "• " + b.message).join("\n")),
     );
   for (const e of d.evaluations) {
     const c = el(
@@ -768,7 +819,7 @@ function evaluationView(d) {
       el(
         "p",
         "inline-note",
-        e.usable ? "报告当前可用于人工发布。" : e.blocking_reason,
+        e.usable ? "报告当前可用于评测通过后发布。" : e.blocking_reason,
       ),
       jsonView("查看门槛统计", e.summary, true),
       button(
@@ -777,7 +828,7 @@ function evaluationView(d) {
         "text-button",
       ),
     );
-    root.append(c);
+    evaluated.append(c);
   }
   const form = el(
     "form",
@@ -810,15 +861,16 @@ function evaluationView(d) {
     );
     await refresh();
   });
-  root.append(
+  evaluated.append(
     form,
     button(
-      "审阅并发布此版本",
+      "评测通过后发布此版本",
       () => reviewAction("publish", d),
       "button",
       state.readOnly || !d.can_publish,
     ),
   );
+  root.append(evaluated);
   if (d.can_withdraw)
     root.append(
       button(
@@ -832,7 +884,7 @@ function evaluationView(d) {
     el(
       "p",
       "action-help",
-      "发布只影响之后新注册的任务。来源确认、离线通过与人工发布分别记录，页面不会自动批准。",
+      "两条路径都会记录发布依据，支持撤回。发布只影响之后新注册的任务；审核通过不代表所有抽取结果都正确。",
     ),
   );
   return root;
@@ -1003,7 +1055,7 @@ async function editMemory(d = null) {
     }
     const result = await api("/api/memories", body);
     $("action-dialog").close();
-    toast(`已保存候选 v${result.revision}，尚未生效。请核验来源并完成评测。`);
+    toast(`已保存候选 v${result.revision}，尚未生效。可人工审核发布，或通过独立评测后发布。`);
     await overview();
     await navigate("memories", { id: result.memory_id });
   });
@@ -1017,7 +1069,7 @@ async function editMemory(d = null) {
       el(
         "p",
         "field-hint",
-        "选择来源会追加到上方列表。未确认来源可暂存，发布前须核验。",
+        "选择来源会追加到上方列表。人工发布时审阅规则及其依据，无需先确认整篇抽取结果正确。",
       ),
     );
     for (const item of [...feedback.items, ...runs.items]) {
@@ -1039,33 +1091,98 @@ async function editMemory(d = null) {
     choices.replaceChildren(el("p", "field-hint", e.message));
   }
 }
+function sourceReviewPreview(source) {
+  const details = el("details", "review-source");
+  details.append(el("summary", null, `查看来源依据 · ${source.title || source.source_id}`));
+  const body = el("div", "review-source-body");
+  details.append(body);
+  let loading = false;
+  details.addEventListener("toggle", async () => {
+    if (!details.open || loading || body.dataset.loaded) return;
+    loading = true;
+    body.replaceChildren(el("p", "inline-note", "正在读取来源与原文证据…"));
+    try {
+      const data = await api(`/api/sources/${encodeURIComponent(source.source_id)}`);
+      const s = data.source;
+      body.replaceChildren(metadata({
+        来源编号: s.source_id,
+        整篇结果状态: s.confirmed ? "已确认（与本次规则审核分别记录）" : "尚未确认（不阻止人工审核规则）",
+      }));
+      if (s.error || s.invalidated)
+        body.append(note("来源需要留意", s.error || "该来源已失效，请核对规则依据。", "error"));
+      if (s.feedback_text) body.append(field("用户反馈", s.feedback_text));
+      for (const insight of s.reflection_event?.reflection?.insights || [])
+        body.append(field(insight.title || "来源观察", insight.observation));
+      body.append(resultView(s.kind === "success" ? "来源抽取结果" : "原抽取结果", data.before_result));
+      if (s.kind !== "success") body.append(resultView("完整修正稿", data.after_result));
+      body.append(el("h4", "field-label", "原文证据摘录"), el("p", "inline-note", data.excerpt_notice));
+      for (const snippet of data.snippets || [])
+        body.append(el("div", "snippet", null, el("span", "chip", snippet.tag), el("p", null, snippet.text)));
+      if (s.excerpt_error) body.append(note("摘录读取失败", s.excerpt_error, "error"));
+      body.append(jsonView("来源元数据与归档路径", s));
+      body.dataset.loaded = "true";
+    } catch (error) {
+      body.replaceChildren(note("来源读取失败", error.message, "error"));
+    } finally {
+      loading = false;
+    }
+  });
+  return details;
+}
 function reviewAction(action, d) {
-  const publish = action === "publish";
+  const manual = action === "publish-reviewed";
+  const publish = manual || action === "publish";
   const form = el(
     "form",
     null,
     null,
     note(
-      publish ? "将发布此经验版本" : "将撤回当前发布版",
-      publish
+      manual ? "审核并批准这一版规则" : publish ? "将按评测依据发布此版本" : "将撤回当前发布版",
+      manual
+        ? `人工审核发布 v${d.memory.revision}，不要求评测通过。仅批准下方规则，不会把来源整篇抽取结果标记为正确标签；之后新任务可按需召回。`
+        : publish
         ? `发布 v${d.memory.revision}，后端会重新核对来源、评测与文件。之后新任务才会使用。`
         : `撤回 v${d.active_revision}，保留历史，不恢复旧版；已注册任务继续使用其快照。`,
     ),
   );
-  const reviewer = inputField(form, "reviewer", "维护者姓名", "", "text", true),
+  if (manual) {
+    form.append(
+      metadata({ 经验编号: d.memory.memory_id, 审核版本: `v${d.memory.revision}`, 内容摘要: d.memory.content_sha256 }),
+      field("经验标题", d.memory.payload.title),
+      field("执行规则", d.memory.payload.rule, true),
+      field("适用前提", d.memory.payload.applies_when),
+      field("排除情况", d.memory.payload.exclusions),
+      field("召回触发词", d.memory.payload.triggers.join("、")),
+      el("h3", "field-label", "来源依据（可在此展开核对）"),
+    );
+    for (const source of d.sources) form.append(sourceReviewPreview(source));
+    if (!d.sources.length) form.append(el("p", "inline-note", "此版本未关联来源。请根据你已核对的依据填写审核理由。"));
+    if ((d.manual_publish_warnings || []).length)
+      form.append(note("审核提醒", d.manual_publish_warnings.map((warning) => warning.message || warning).join("\n")));
+  }
+  const reviewer = inputField(form, "reviewer", "审核人姓名", "", "text", true),
     reason = inputField(form, "note", "审核说明", "", "textarea", true);
+  if (manual) reason.placeholder = "说明你核对了什么依据、为什么认可这条规则及其适用边界。";
   const ack = acknowledgement(
     form,
-    "我已审阅规则、来源及评测边界，并确认执行此操作。审核姓名用于留痕，不是登录认证。",
+    manual
+      ? `我已审阅并批准上述 v${d.memory.revision} 规则及适用边界。本次仅批准规则，不确认整篇抽取结果正确；此版本将标为人工审核发布。`
+      : "我已审阅规则、来源及评测边界，并确认执行此操作。审核姓名用于留痕，不是登录认证。",
   );
-  submitForm(form, publish ? "确认发布" : "确认撤回", async () => {
+  form.append(el("p", "field-hint", "审核姓名用于本地审计留痕，不是登录认证。"));
+  submitForm(form, manual ? "人工审核发布此版本" : publish ? "评测通过后发布" : "确认撤回", async () => {
     const body = {
       memory_id: d.memory.memory_id,
       reviewer: reviewer.value,
       note: reason.value,
       acknowledged: ack.checked,
     };
-    if (publish)
+    if (manual)
+      Object.assign(body, {
+        revision: d.memory.revision,
+        content_sha256: d.memory.content_sha256,
+      });
+    else if (publish)
       Object.assign(body, {
         revision: d.memory.revision,
         evaluation_id: d.publish_evaluation_id,
@@ -1075,12 +1192,14 @@ function reviewAction(action, d) {
     $("action-dialog").close();
     toast(
       publish
-        ? "经验已发布，之后新注册任务可按需召回。"
+        ? manual
+          ? "此版本已人工审核发布，之后新注册任务可按需召回；整篇结果标签未改变。"
+          : "经验已按评测依据发布，之后新注册任务可按需召回。"
         : "经验已撤回，历史和已注册任务的快照保留。",
     );
     await refresh();
   });
-  dialog(publish ? "人工审阅与发布" : "撤回当前经验", form);
+  dialog(manual ? "人工审核发布具体规则版本" : publish ? "评测通过后发布" : "撤回当前经验", form);
 }
 async function openSource(id) {
   dialog("读取来源", el("p", null, "正在读取真实来源与证据…"));
@@ -1275,7 +1394,7 @@ function confirmSource(s) {
       acknowledged: ack.checked,
     });
     $("action-dialog").close();
-    toast("来源已确认，经验尚需评测和人工发布。");
+    toast("整篇来源已确认，可作为评测依据。规则是否发布仍单独记录。");
     await refresh();
   });
   dialog("人工核验来源", form);
@@ -1357,7 +1476,7 @@ function runView(d) {
         null,
         note(
           "先审阅，再整理",
-          "下面是可交给经验维护 agent 的任务。来源未确认时，不能声称已完成发布。",
+          "下面是可交给经验维护 agent 的任务。来源确认与规则发布分别记录；Agent 自动发布仍需独立评测，人工可在经验页审核具体规则后发布。",
         ),
         el(
           "pre",

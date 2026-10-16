@@ -125,6 +125,19 @@ class MemoryUITests(unittest.TestCase):
         finally:
             other.server_close()
 
+    def test_reviewed_publish_keeps_csrf_read_only_and_explicit_human_ack(self):
+        body = {"memory_id": "missing", "revision": 1, "content_sha256": "a" * 64,
+                "reviewer": "合成审核人", "note": "仅合成请求", "acknowledged": True}
+        self.assertEqual(self.request("POST", "/api/publish-reviewed", body,
+                         {"Content-Type": "application/json", "Origin": self.origin})[0], 403)
+        for value in (False, 1, "true", None):
+            status, _, raw = self.post(path="/api/publish-reviewed", body={**body, "acknowledged": value})
+            self.assertEqual(status, 400)
+            self.assertIn("acknowledged", json.loads(raw)["error"])
+        self.server.read_only = True
+        self.assertEqual(self.post(path="/api/publish-reviewed", body=body)[0], 403)
+        self.assertFalse(self.private.exists())
+
     def test_queries_are_plain_strings_and_post_is_direct_json(self):
         service = EchoService()
         self.server.service = service

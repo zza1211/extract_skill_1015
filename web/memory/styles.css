@@ -1928,3 +1928,17 @@ code,
 .badge.running { background:#e7effa; color:#315880; }
 .badge.completed, .badge.resolved { background:#e4f2e9; color:#2b6845; }
 .badge.rejected, .badge.failed { background:#fbe9e7; color:#9b4035; }
+.publication-record { padding:14px 0; border-bottom:1px solid var(--border, #e2e8e5); margin-bottom:18px; }
+.publication-record .metadata { margin-top:14px; }
+.publication-route { display:grid; gap:14px; padding:20px; border:1px solid var(--border, #e2e8e5); border-radius:12px; margin-bottom:22px; }
+.publication-route > h3, .publication-route > p { margin:0; }
+.publication-route > p { font-size:13px; line-height:1.8; color:#6f6047; }
+.publication-route > .button { justify-self:start; }
+.human-route { background:#f5faf6; border-color:#cddfcf; }
+.badge.human_review { background:#e7effa; color:#315880; }
+.badge.evaluated { background:#e4f2e9; color:#2b6845; }
+.record-publication { margin:8px 0 0; color:#315880; font-size:11px; line-height:1.6; }
+.review-source { margin:12px 0; padding:12px 14px; border:1px solid var(--border, #e2e8e5); border-radius:8px; }
+.review-source > summary { cursor:pointer; font-size:13px; overflow-wrap:anywhere; }
+.review-source-body { margin-top:14px; max-height:460px; overflow:auto; padding-right:8px; }
+.review-source-body .metadata { font-size:12px; }

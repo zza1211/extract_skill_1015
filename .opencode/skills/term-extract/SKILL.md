@@ -2,7 +2,7 @@
 name: term-extract
 description: 从带 Cxx 定位标签的标书 text/table JSON 中识别采购设备或系统，提取支持选型配置的技术条款范围、通用与分散关联及采购数量；由 OpenCode 主 agent 根据原文完成判断。
 metadata:
-  version: "0.6.4"
+  version: "0.7.0"
   language: "zh-CN"
 ---
 
@@ -18,7 +18,7 @@ metadata:
 
 ## 选择执行模式
 
-唯一执行入口为 OpenCode 的 term-extractor 主 agent。你根据原文和阶段结果自主选择读取、搜索、核验、复盘与独立验证；Python 工具只做定位、存储、比较和门槛检查，不启动模型或决定下一步。网页用于管理经验、案例与人工待办，不发起抽取。模型使用当前 OpenCode 会话选择的模型。
+唯一执行入口为 OpenCode 的 term-extractor 主 agent。你根据原文和阶段结果自主选择读取、搜索、核验、复盘与独立验证；Python 工具只做定位、存储、比较和门槛检查，不启动模型或决定下一步。网页用于管理经验、案例、人工待办与标书结果校验，不发起抽取。模型使用当前 OpenCode 会话选择的模型。
 
 没有标签时，按下文完成抽取与复盘；自检观察先留为候选。有用户提供的可信标签时，先读 [标签学习与独立验证](references/learning-modes.md)：prepare 后用 term_learning_begin 登记，再用同一套原文工具完成抽取和 commit，之后才能 compare 揭示标签。每篇标书使用新会话，不预读标签或同文档历史答案；自己整理的修正稿不能冒充用户标签。
 
@@ -82,11 +82,21 @@ metadata:
 
 使用 term_result_commit 保存已核验草稿。工具会核对读取回执、输入版本和未解决事项；不满足条件时返回明确错误，修复后再提交。成功后保存不可变运行记录，返回 learning.run_id（下文简称 run_id）；复盘中的观察可形成带 source_ids 的未验证候选，它们不会进入生产召回。报告 run_id、结果路径与需复核的语义提示。达到预算上限时保留草稿并报告未完成，不把文字总结当成已提交结果。
 
+成功交付后明确提示用户在网页“条款校验”核对本篇抽取，并主动点击“完成整篇校验”。报告返回的当前结果路径和校验状态；未点击仍是未校验，保存局部修改不等于完成整篇校验。网页校验修改单独保存并同步当前结果文件，原始模型预测和盲抽成绩保持不可变。完整操作见 [结果校验与反馈学习](../../../docs/result-review.md)。
+
 检查 learning 状态：若 committed=true 但 learning.status=learning_failed，结果已经保存，学习归档或复盘尚未完成。明确报告该状态，按工具 next_action 重试或补齐，不声称候选已保存，也不编造 run_id。演示运行不进入经验库。
 
 ### 5. 接收反馈与补齐复盘
 
-用户针对已提交结果给出反馈时，先调用 term_memory_feedback，传旧 run_id、用户反馈原话 feedback_text、必填 reflection_json，以及可选的 after_result_json。feedback_text 保留原话；after_result_json 是你整理的修正稿，在 confirm-feedback 前不能称为人工正确答案。区分用户指出的事实与你提出的修正，不能自行填写确认人或把反馈视为人工验收。
+推荐用户在网页按标书查看条款、定位原文、修改边界或数量、删除条款或标记非目标，并在整篇核查结束后显式点击“完成整篇校验”。非目标和单条删除保留为纠错操作；“删除本篇结果”仅移除不再需要的结果，不是错误标签，不能生成纠错经验。已校验后再次修改会变成待重新校验，旧修订的学习记录保持可追溯。
+
+用户回复“校验完成”或要求从已校验结果学习时，先调用 term_review_pending，只获取无答案的待学习目录。对相应 run_id/revision 用 term_review_read 按 next_cursor 读完原始抽取、已校验结果和用户操作，并用返回的 index_path 回读有关原文。只有网页当前已确认且未漂移的修订可以学习；聊天回复不能替代网页确认，不能代人调用人工确认接口。
+
+你自主区分本篇固定答案、用户操作与可迁移规律；以 term_review_reflect 传入与正式提交相同的 reflection_json，最多三条真实标签支撑的经验。没有新规律时用空 insights 和原因，也记录该修订已学习。工具将不可变已校验快照导入可信 development 案例并作为候选来源，不要求重复 confirm-run；候选仍需独立评测或人工审核发布。工具不调模型，网页不后台唤醒 OpenCode；由当前会话主动完成读取、核验、总结。读取人工结果后，下一篇盲抽需新会话。
+
+对话局部反馈仍可使用下面兼容通路；它不会自动代替网页整篇校验。
+
+用户在对话中对已提交结果提出具体局部纠错、尚未通过网页整篇确认时，调用 term_memory_feedback，传旧 run_id、用户反馈原话 feedback_text、必填 reflection_json，以及可选的 after_result_json。feedback_text 保留原话；after_result_json 是你整理的修正稿，在 confirm-feedback 前不能称为人工正确答案。区分用户指出的事实与你提出的修正，不能自行填写确认人或把局部反馈视为整篇人工验收。网页已确认的整篇修订走上面的 term_review 通路，不再重复要求旧确认。
 
 若第一次只保存原话、没有修正稿，形成完整修正稿后必须再次调用 term_memory_feedback：仍传同一旧 run_id、同一用户原话，增加完整 after_result_json 和本次复盘，取得新的 feedback_id。新提交不会自动补齐旧反馈。交给维护者确认的是新的带稿 feedback_id，旧反馈保留未确认；若首次已具备完整修正稿，可一次记录。
 

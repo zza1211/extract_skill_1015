@@ -144,7 +144,7 @@ def main() -> int:
             "status": "demo_submitted" if demo else "submitted",
             "production_submittable": not demo,
             "model_id": args.model_id,
-            "skill_version": "0.6.4",
+            "skill_version": "0.7.0",
             "skill_sha256": hashlib.sha256(skill_path.read_bytes()).hexdigest(),
             "reference_sha256": reference_hashes,
             "source_path": index.get("source_path"),
@@ -182,9 +182,19 @@ def main() -> int:
             except (OSError, ValueError, TypeError, KeyError) as error:
                 learning = {**learning, "status": "learning_failed", "error": str(error),
                             "next_action": "抽取结果已保存；修复学习存储后，用同样参数重试提交，或按 run_id 补交复盘。"}
+        review = {"status": "not_applicable"}
+        if not demo and not args.trial_only and learning.get("run_id"):
+            try:
+                from document_review import ensure_run
+                review = ensure_run(args.project_root, learning["run_id"])
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                review = {"status": "initialization_failed", "error": str(error),
+                          "next_action": "抽取结果已保存，请在条款校验页重新打开本次运行以准备校验工作文件。"}
         record["learning"] = learning
+        record["result_review"] = review
         record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-        print(json.dumps({"committed": True, "status": record["status"], "result_path": str(result_path), "evidence_path": str(evidence_path), "run_path": str(record_path), "production_submittable": not demo, "semantic_validation": record["semantic_validation"], "learning": learning}, ensure_ascii=False))
+        print(json.dumps({"committed": True, "status": record["status"], "result_path": str(result_path), "evidence_path": str(evidence_path), "run_path": str(record_path), "production_submittable": not demo, "semantic_validation": record["semantic_validation"], "learning": learning, "result_review": review,
+                          "next_action": "请提示用户到网页的条款校验页核对本篇结果，并主动完成整篇校验。用户反馈校验完成后，使用 term_review 工具读取已校验修订、总结候选经验。" if review.get("status") != "not_applicable" else "按本次运行状态报告结果。"}, ensure_ascii=False))
         return 0
     except (OSError, ValueError, TypeError, KeyError) as error:
         print(json.dumps({"committed": False, "errors": [str(error)]}, ensure_ascii=False))

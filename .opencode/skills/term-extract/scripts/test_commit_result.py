@@ -91,6 +91,27 @@ class CommitLearningTests(unittest.TestCase):
         self.assertEqual(response["learning"]["status"], "pending_reflection")
         self.assertEqual(memory_store.list_memories(self.root)["memories"], [])
 
+    def test_commit_initializes_pending_human_review_and_editable_work_file(self):
+        code, response = self.invoke({"insights": [], "no_experience_reason": "合成提交不产生新经验。"})
+        self.assertEqual(code, 0)
+        self.assertTrue(response["committed"])
+        review = response["result_review"]
+        self.assertEqual(review["run_id"], response["learning"]["run_id"])
+        self.assertEqual(review["status"], "pending")
+        self.assertEqual(json.loads(Path(review["current_result_path"]).read_text(encoding="utf-8")),
+                         json.loads(self.result.read_text(encoding="utf-8")))
+        self.assertNotEqual(Path(review["current_result_path"]), Path(response["result_path"]))
+        self.assertIn("校验", response["next_action"])
+
+    def test_review_initialization_failure_does_not_lose_committed_result(self):
+        import document_review
+        with patch.object(document_review, "ensure_run", side_effect=ValueError("synthetic review storage failure")):
+            code, response = self.invoke({"insights": [], "no_experience_reason": "合成提交不产生新经验。"})
+        self.assertEqual(code, 0)
+        self.assertTrue(response["committed"])
+        self.assertEqual(response["result_review"]["status"], "initialization_failed")
+        self.assertTrue(Path(response["result_path"]).is_file())
+
     def test_learning_storage_failure_preserves_committed_result_and_reports_retry(self):
         with patch.object(commit_result, "register_run", side_effect=ValueError("synthetic storage failure")):
             code, response = self.invoke({"insights": [], "no_experience_reason": "No new reusable observation."})

@@ -221,6 +221,7 @@ async function overview() {
   );
 }
 const sections = {
+  documents: ["条款校验", "按标书校验抽取结果；保存修正、明确完成校验，再交给 OpenCode 总结候选经验。", "标书结果"],
   learning: ["学习与案例", "查看 OpenCode 的自主学习记录，维护可信案例；抽取和模型执行统一在 OpenCode 中完成。", "学习记录"],
   reviews: ["待确认事项", "只处理程序无法确定的差异和冲突；答复保留适用范围与审计记录。", "待确认事项"],
   memories: [
@@ -245,7 +246,13 @@ const sections = {
   ],
 };
 async function navigate(section, options = {}) {
+  if (state.section === "documents" && section !== "documents" &&
+      window.TermDocuments && !(await window.TermDocuments.canLeave())) return;
   state.section = section;
+  document.body.classList.toggle("documents-mode", section === "documents");
+  if (section !== "documents" && location.hash.startsWith("#documents"))
+    history.replaceState(null, "", `${location.pathname}${location.search}#${section}`);
+  if (section === "documents" && options.runId) window.TermDocuments.setRoute(options.runId);
   state.selected = options.id || null;
   state.items = [];
   state.tab = "rule";
@@ -362,6 +369,7 @@ function card(item) {
   return n;
 }
 async function loadList(append = false) {
+  if (state.section === "documents") return window.TermDocuments.load();
   if (["learning", "reviews"].includes(state.section)) {
     return window.TermEvolution.load();
   }
@@ -1528,6 +1536,7 @@ function runView(d) {
       "detail-actions",
       null,
       button("查看来源与核验", () => openSource(r.run_id)),
+      button("校验本篇条款", () => navigate("documents", { runId: r.run_id })),
       button("整理候选的操作提示", help),
     ),
   );
@@ -1653,7 +1662,7 @@ $("search-input").addEventListener("input", () => {
     $("connection-label").textContent = "已连接本地经验库";
     $("connection-dot").className = "connection-dot connected";
     await overview();
-    await navigate("memories");
+    await navigate(location.hash.startsWith("#documents") || new URLSearchParams(location.search).get("view") === "documents" ? "documents" : "memories");
   } catch (e) {
     $("connection-label").textContent = "连接失败，请检查服务";
     $("connection-dot").className = "connection-dot failed";
@@ -1663,3 +1672,7 @@ $("search-input").addEventListener("input", () => {
     toast(e.message, true);
   }
 })();
+window.addEventListener("hashchange", () => {
+  if (location.hash.startsWith("#documents"))
+    navigate("documents").catch((e) => toast(e.message, true));
+});

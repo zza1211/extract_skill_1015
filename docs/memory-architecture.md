@@ -1,4 +1,4 @@
-# 经验记忆架构（0.6.2）
+# 经验记忆架构（0.7.0）
 
 OpenCode `term-extractor` 是唯一执行入口；Python 原子工具不调模型、不预先编排模型调用。网页管理同一私有记忆库。业务过程见[演进方案](learning-evolution.md)，网页操作见[记忆工作台](memory-dashboard.md)。
 
@@ -28,6 +28,8 @@ OpenCode `term-extractor` 是唯一执行入口；Python 原子工具不调模�
 
 网页 → 本机 HTTP → 同一库的查看、案例导入、待办答复、经验维护
         └─ 人工审核指定修订 → 核对来源/冲突 → 保存审核记录 → 发布
+        └─ 按标书修改条款 → 工作文件同步 + 追加修订 → 用户完成整篇校验
+              → 不可变标签快照 → OpenCode读取对照与原文 → 候选／无新经验
 ```
 
 程序保存和检查事实，代理安排下一步；没有网页后台模型运行器。旧 `learning_runner.py` 只读 0.5.0 历史任务，执行和设置入口已停用并明确报错。
@@ -39,6 +41,7 @@ OpenCode `term-extractor` 是唯一执行入口；Python 原子工具不调模�
 ```text
 .term-memory/
 ├─ memory.sqlite3
+├─ document-review.sqlite3  标书修订、整篇确认／丢弃和学习状态
 ├─ learning-artifacts/     run、证据、反馈等内容地址归档
 ├─ evolution-artifacts/    可信案例的输入、标签与内部索引
 ├─ agent-trials/
@@ -46,6 +49,7 @@ OpenCode `term-extractor` 是唯一执行入口；Python 原子工具不调模�
 └─ .workflow/jobs/         0.5.0 历史作业工件；不用于新任务
 
 runs/                     自主抽取的索引、回执、草稿、报告和结果
+└─ <运行目录>/review/<run_id>/result.json  网页同步的当前结果；原始预测不覆写
 ```
 
 目录为示意，工件以注册记录中的实际路径和摘要为准。源文件、索引和归档都是核验依据；不能只保留数据库就删除外部文件。私有目录、真实标书、标签和运行输出不随代码推送。
@@ -65,7 +69,10 @@ runs/                     自主抽取的索引、回执、草稿、报告和结
 | evoz_conflicts / scans | 疑似冲突、扫描签名与周期依据 |
 | evoz_experiments | 重新计算的配对实验与准入依据 |
 | agent_studies / agent_learning_events | 学习身份、首次冻结、判断、复盘等追加事件 |
+| agent_document_review_events | 已校验修订的分页交付、标签揭示与复盘重放依据 |
 | agent_trial_plans / claims / results / judgments / evaluations | 试验票号、限定会话、真实提交和局部复核 |
+
+独立的 `document-review.sqlite3` 中，`review_revisions` 保存条款和操作前后值，`review_documents` 保存整篇丢弃／恢复事件，`review_learning` 绑定已确认修订与候选。三表均只追加。未校验或再次修改的结果不能作为可信标签；整篇丢弃不产生负例。同步、确认与学习的数据流见[结果校验说明](result-review.md)。
 
 0.5.0 的 `workflow_jobs / workflow_job_events / workflow_settings / workflow_claims` 作为历史保留，新流程不以它们调度模型。
 

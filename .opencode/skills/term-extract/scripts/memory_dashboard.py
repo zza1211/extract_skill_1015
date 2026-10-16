@@ -416,6 +416,11 @@ class DashboardService:
     def get(self, path: str, query: dict) -> dict:
         query = query or {}
         parts = [unquote(part) for part in path.strip("/").split("/")]
+        if parts[:2] == ["api", "documents"]:
+            import document_review
+            value = document_review.handle_get(self.root, parts[2:], query)
+            if value is not None:
+                return value
         if parts[:2] in (["api", "learning"], ["api", "reviews"]):
             import evolution_dashboard
             value = evolution_dashboard.get(self.root, parts, query)
@@ -473,6 +478,11 @@ class DashboardService:
         if not isinstance(body, dict):
             raise MemoryError("请求体必须为JSON对象。")
         parts = [unquote(part) for part in path.strip("/").split("/")]
+        if parts[:2] == ["api", "documents"]:
+            import document_review
+            value = document_review.handle_post(self.root, parts[2:], body)
+            if value is not None:
+                return value
         if parts[:2] in (["api", "learning"], ["api", "reviews"], ["api", "experiences"]):
             import evolution_dashboard
             value = evolution_dashboard.post(self.root, parts, body)

@@ -1,4 +1,4 @@
-# 经验复盘、反馈与发布（0.6.2）
+# 经验复盘、反馈与发布（0.7.0）
 
 OpenCode term-extractor 主 agent 自主编排抽取与学习，网页管理记忆。标签学习使用 begin 登记、正常抽取与 commit、compare 冻结预测后揭示标签，再 judge/reflect；自动发布须由主 agent 调原生 task 的 term-trial 子 agent 独立验证，finalize 通过后调用 publish。人工另可在网页审核指定修订并直接发布，无需先评测。Python 只提供原子工具，不调模型、不自动排后续步骤。可信标签不重复执行旧来源确认。详见[两种模式](learning-modes.md)和[完整演进方案](../../../../docs/learning-evolution.md)。
 
@@ -56,7 +56,19 @@ OpenCode term-extractor 主 agent 自主编排抽取与学习，网页管理记�
 
 同一来源的相同复盘可重复提交；不同内容不能静默覆盖。后续补充应登记新反馈或由 curator 创建候选新修订。直接使用 CLI 提交或登记而没传复盘时，运行显示 `pending_reflection`，可用 `term_memory_reflect(run_id, reflection_json)` 或 CLI `reflect` 补齐；没有材料不能猜测复盘。
 
-## 接收用户反馈
+## 网页结果校验后学习（推荐）
+
+正式提交后提醒用户到“标书校验”检查本篇，未点击“校验完成”就保持未校验。网页按标书保存不可变原始预测、可编辑当前结果、操作历史和显式整篇确认；单次保存或对话回复不构成整篇确认。修改已确认结果需重新校验，整篇弃用不作为错误反馈。操作、边界跳转与文件同步见 [校验说明](../../../../docs/result-review.md)。
+
+用户明确要求从已校验结果学习时，主 agent 使用：
+
+1. `term_review_pending`：仅列当前待学习修订的安全元数据，无标签或用户操作。
+2. `term_review_read(run_id,revision,cursor?)`：当前 term-extractor 显式获取原始预测、确认结果、用户操作与原文索引；按 next_cursor 读完。记录统一标签揭示审计，后续新盲抽换新会话。
+3. 回读相关原文，区分具体答案和可迁移经验。`term_review_reflect(run_id,revision,reflection_json)`：字段与上文完全一致，不机械凑经验。无新经验时保留空 insights 和具体原因。
+
+只能读取用户在网页确认的当前未漂移修订。反思工具复查原文、索引、工作结果和确认快照；把不可变确认标签导入可信 development 案例，以 case_id 为候选来源，保存 run_id、review_revision、verified_sha256 和真实 evidence_tags。无需再次 confirm-run，也不会把尚未确认的可编辑文件当正确标签。重复操作幂等，不覆盖原始抽取；候选仍须独立评测或人工审核发布才生效。网页显示“已校验待学习”和“已学习”，不伪装成后台学习已运行。
+
+## 对话局部反馈（兼容）
 
 收到已提交结果的反馈时，先调用 `term_memory_feedback`：
 

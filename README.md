@@ -1,8 +1,8 @@
 # 条款抽取 Skill POC
 
-**0.6.4：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆，不发起模型调用。暂不引入向量模型。
+**0.7.0：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆与标书结果校验，不发起模型调用。暂不引入向量模型。
 
-先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；评测集准备、原生验证流程及前端清单框见[评测指南](docs/evaluation-guide.md)，网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
+先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；按标书检查条款、修改边界、同步文件和反馈学习见[结果校验说明](docs/result-review.md)。评测集准备、原生验证流程及前端清单框见[评测指南](docs/evaluation-guide.md)，网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
 
 ## 启动
 
@@ -68,7 +68,7 @@ opencode run --session 'ses_你的会话ID' --agent term-extractor --variant low
 
 恢复原会话可沿用已交付原文及回执；如果另开会话，必须重新实际读取全文，不能把旧会话回执当成本次已读取。恢复指引不是后台重试器，生成上限、上下文不足或工具错误仍需如实处理。
 
-## 网页只管理记忆
+## 网页管理记忆与结果校验
 
 另开终端启动，无前端构建依赖：
 
@@ -76,7 +76,9 @@ opencode run --session 'ses_你的会话ID' --agent term-extractor --variant low
 python -X utf8 .opencode/skills/term-extract/scripts/memory_ui.py
 ```
 
-打开终端地址，默认 `http://127.0.0.1:8765/`。网页可查看学习记录、经验和修订、导入可信案例、回答待办、检查冲突及撤回；不选择模型、不创建或继续抽取。只读浏览可加 `--read-only`。
+打开终端地址，默认 `http://127.0.0.1:8765/`。网页可查看学习记录、经验和修订、导入可信案例、回答待办、检查冲突及撤回；“条款校验”按输入展示条款与高亮 C 标签的原文，支持修改、删除、标记非目标及显式整篇确认；不选择模型、不创建或继续抽取。只读浏览可加 `--read-only`。
+
+每次提交后，Agent 提示你校验。网页保存修改并同步索引所在目录下 `review/<run_id>/result.json`，保留原始预测和操作历史；保存局部修改不等于整篇确认。点击“完成整篇校验”后，回到 OpenCode 发送“请从已校验结果学习”，Agent 通过 `term_review_pending/read/reflect` 总结候选或说明无新经验，页面显示当前修订已学习。改动已校验结果需重新确认；“删除本篇结果”仅移除不再需要的结果，不作为纠错。候选仍需评测或人工审核发布。网页没有后台模型和自动唤醒，完整流程见[结果校验说明](docs/result-review.md)。
 
 0.5.0 的 Python 作业保留只读历史，旧 create/start/run/settings/models 入口明确停用。新的抽取与学习不进入旧运行器。网页中的 OpenCode 指引只复制提示词，不自动发给模型。
 

@@ -35,7 +35,8 @@ class MemoryUITests(unittest.TestCase):
         web = self.root / "web" / "memory"
         web.mkdir(parents=True)
         for name, content in (("index.html", "<!doctype html><title>合成页面</title>"),
-                              ("app.js", "console.log('fixture');"), ("styles.css", "body {color: black}")):
+                              ("app.js", "console.log('fixture');"), ("styles.css", "body {color: black}"),
+                              ("documents.js", "console.log('review fixture');"), ("documents.css", ".document-review {display: block}")):
             (web / name).write_text(content, encoding="utf-8")
         self.server = memory_ui.create_server(self.root, port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
@@ -81,7 +82,8 @@ class MemoryUITests(unittest.TestCase):
         self.assertFalse(self.private.exists())
 
     def test_security_headers_and_static_allowlist(self):
-        for route, mime in (("/", "text/html"), ("/app.js", "text/javascript"), ("/styles.css", "text/css")):
+        for route, mime in (("/", "text/html"), ("/app.js", "text/javascript"), ("/styles.css", "text/css"),
+                            ("/documents.js", "text/javascript"), ("/documents.css", "text/css")):
             with self.subTest(route=route):
                 status, headers, _ = self.request(path=route)
                 self.assertEqual(status, 200)
@@ -93,6 +95,68 @@ class MemoryUITests(unittest.TestCase):
                 self.assertFalse(any(key.lower().startswith("access-control-") for key in headers))
         self.assertEqual(self.request(path="/favicon.svg")[0], 404)
         self.assertEqual(self.request(path="/memory.sqlite3")[0], 404)
+
+    def test_document_review_http_flow_and_read_only_no_feedback_for_discard(self):
+        import document_io
+        import document_review
+        import memory_learning
+        source = self.root / "source.json"
+        source.write_text(json.dumps([{"text": "<C1>AP<C2>Wi-Fi 6<C3>数量2台<C4>机柜<C5>42U"}], ensure_ascii=False), encoding="utf-8")
+        prepared = document_io.prepare(source, self.root / "task")
+        index_path = Path(prepared["index_path"])
+        result = [{"id": 0, "条款标题": "AP", "条款分类": "normal", "相关条款": [], "产品分类": "WLAN AP", "定位标识": ["<C1>", "<C1>"], "产品数量": "2台"},
+                  {"id": 1, "条款标题": "机柜", "条款分类": "normal", "相关条款": [], "产品分类": "Others", "定位标识": ["<C4>", "<C5>"], "产品数量": "未提及"}]
+        evidence = {"clauses": [], "unresolved": []}
+        paths = [self.root / name for name in ("result.json", "evidence.json", "run.json")]
+        values = [result, evidence, {"status": "submitted", "production_submittable": True,
+                  "source_sha256": memory_store._file_hash(source), "coverage": {"complete": True, "index_sha256": memory_store._file_hash(index_path)}}]
+        for path, value in zip(paths, values):
+            path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        run = memory_learning.register_run(self.root, index_path, *paths)
+        review = document_review.ensure_run(self.root, run["run_id"])
+        route = "/api/documents/" + review["document_id"]
+        status, _, raw = self.request(path="/api/documents")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)["documents"][0]["status"], "pending")
+        status, _, raw = self.request(path=route)
+        self.assertEqual(status, 200)
+        detail = json.loads(raw)
+        payload = {"run_id": run["run_id"], "expected_revision": detail["revision"], "action": "update",
+                   "clause_key": detail["clauses"][0]["clause_key"], "patch": {"定位标识": ["<C1>", "<C2>"]}}
+        self.server.read_only = True
+        self.assertEqual(self.post(path=route + "/edit", body=payload)[0], 403)
+        self.server.read_only = False
+        status, _, raw = self.post(path=route + "/edit", body=payload)
+        self.assertEqual(status, 200, raw)
+        detail = json.loads(raw)
+        self.assertEqual(detail["status"], "modified")
+        self.assertEqual(json.loads(Path(detail["current_result_path"]).read_text(encoding="utf-8"))[0]["定位标识"], ["<C1>", "<C2>"])
+        status, _, raw = self.post(path=route + "/edit", body={"run_id": run["run_id"], "expected_revision": detail["revision"],
+            "action": "non_target", "clause_key": detail["clauses"][1]["clause_key"], "reason": "机柜不属于目标设备。"})
+        self.assertEqual(status, 200, raw)
+        detail = json.loads(raw)
+        self.assertEqual(len(detail["result"]), 1)
+        status, _, raw = self.request(path=route + "/source?tag=%3CC2%3E")
+        self.assertEqual(status, 200, raw)
+        self.assertIn("<C2>", json.loads(raw)["text"])
+        status, _, raw = self.post(path=route + "/verify", body={"run_id": run["run_id"], "expected_revision": detail["revision"],
+            "acknowledged": True, "reviewer": "合成测试审阅者", "family_id": "http-fixture-family", "note": "仅验证界面协议。"})
+        self.assertEqual(status, 200, raw)
+        detail = json.loads(raw)
+        self.assertEqual(detail["status"], "verified")
+        self.assertEqual(detail["learning"]["status"], "pending")
+        status, _, raw = self.post(path=route + "/discard", body={"run_id": run["run_id"], "expected_revision": detail["revision"]})
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(json.loads(raw)["status"], "discarded")
+        self.assertEqual(document_review.list_verified(self.root)["reviews"], [])
+        with memory_store._db(self.root) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM learning_feedback").fetchone()[0], 0)
+
+    def test_empty_document_review_list_is_read_only(self):
+        status, _, raw = self.request(path="/api/documents")
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(json.loads(raw)["documents"], [])
+        self.assertFalse(self.private.exists())
 
     def test_evaluation_example_is_exact_read_only_public_file(self):
         example = self.root / "examples" / "evaluation" / "manifest.example.json"

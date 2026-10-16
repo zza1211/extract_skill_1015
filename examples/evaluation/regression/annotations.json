@@ -1,0 +1,30 @@
+[
+  {
+    "object_key": "poe-switch",
+    "anchor_tag": "<C1>",
+    "required_tags": [
+      "<C1>",
+      "<C3>",
+      "<C5>"
+    ],
+    "forbidden_tags": [
+      "<C6>",
+      "<C7>"
+    ],
+    "quantity": "6台",
+    "clause_category": "normal"
+  },
+  {
+    "object_key": "firewall",
+    "anchor_tag": "<C6>",
+    "required_tags": [
+      "<C6>",
+      "<C7>"
+    ],
+    "forbidden_tags": [
+      "<C5>"
+    ],
+    "quantity": "2台",
+    "clause_category": "normal"
+  }
+]

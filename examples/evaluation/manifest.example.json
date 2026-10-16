@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "synthetic-development",
+      "family_id": "synthetic-school-a",
+      "role": "fix",
+      "split": "development",
+      "confirmed_by": "合成示例作者（仅示意人工标注格式）",
+      "index_path": "development/prepared/index.json",
+      "baseline_result_path": "development/baseline.json",
+      "candidate_result_path": "development/candidate.json",
+      "assertions": [
+        {
+          "object_key": "indoor-ap",
+          "anchor_tag": "<C1>",
+          "required_tags": [
+            "<C1>",
+            "<C5>",
+            "<C7>"
+          ],
+          "forbidden_tags": [
+            "<C8>",
+            "<C9>"
+          ],
+          "quantity": "12台",
+          "clause_category": "normal"
+        },
+        {
+          "object_key": "firewall",
+          "anchor_tag": "<C8>",
+          "required_tags": [
+            "<C8>",
+            "<C9>"
+          ],
+          "forbidden_tags": [
+            "<C7>"
+          ],
+          "quantity": "1台",
+          "clause_category": "normal"
+        }
+      ]
+    },
+    {
+      "case_id": "synthetic-regression",
+      "family_id": "synthetic-hospital-b",
+      "role": "regression",
+      "split": "regression",
+      "confirmed_by": "合成示例作者（仅示意人工标注格式）",
+      "index_path": "regression/prepared/index.json",
+      "baseline_result_path": "regression/baseline.json",
+      "candidate_result_path": "regression/candidate.json",
+      "assertions": [
+        {
+          "object_key": "poe-switch",
+          "anchor_tag": "<C1>",
+          "required_tags": [
+            "<C1>",
+            "<C3>",
+            "<C5>"
+          ],
+          "forbidden_tags": [
+            "<C6>",
+            "<C7>"
+          ],
+          "quantity": "6台",
+          "clause_category": "normal"
+        },
+        {
+          "object_key": "firewall",
+          "anchor_tag": "<C6>",
+          "required_tags": [
+            "<C6>",
+            "<C7>"
+          ],
+          "forbidden_tags": [
+            "<C5>"
+          ],
+          "quantity": "2台",
+          "clause_category": "normal"
+        }
+      ]
+    },
+    {
+      "case_id": "synthetic-counterexample",
+      "family_id": "synthetic-factory-c",
+      "role": "counterexample",
+      "split": "regression",
+      "confirmed_by": "合成示例作者（仅示意人工标注格式）",
+      "index_path": "counterexample/prepared/index.json",
+      "baseline_result_path": "counterexample/baseline.json",
+      "candidate_result_path": "counterexample/candidate.json",
+      "assertions": [
+        {
+          "object_key": "outdoor-ap",
+          "anchor_tag": "<C5>",
+          "required_tags": [
+            "<C5>",
+            "<C6>",
+            "<C7>"
+          ],
+          "forbidden_tags": [
+            "<C8>",
+            "<C9>",
+            "<C10>"
+          ],
+          "quantity": "4台",
+          "clause_category": "normal"
+        },
+        {
+          "object_key": "industrial-switch",
+          "anchor_tag": "<C8>",
+          "required_tags": [
+            "<C8>",
+            "<C9>",
+            "<C10>"
+          ],
+          "forbidden_tags": [
+            "<C5>",
+            "<C6>",
+            "<C7>"
+          ],
+          "quantity": "2台",
+          "clause_category": "normal"
+        }
+      ],
+      "scope_note": "相邻表行明确列出不同设备、不同数量及独立参数，不能套用同一设备的连续参数归并规则；两个采购项必须分开。"
+    }
+  ]
+}

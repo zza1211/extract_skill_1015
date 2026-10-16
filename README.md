@@ -1,8 +1,8 @@
 # 条款抽取 Skill POC
 
-**0.6.2：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆，不发起模型调用。暂不引入向量模型。
+**0.6.3：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆，不发起模型调用。暂不引入向量模型。
 
-先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
+先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；评测集准备、原生验证流程及前端清单框见[评测指南](docs/evaluation-guide.md)，网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
 
 ## 启动
 
@@ -125,6 +125,16 @@ python -X utf8 .opencode/skills/term-extract/scripts/memory_ui.py
 模型调用和资源由 OpenCode 会话管理，没有旧网页运行器预算配置。三个案例的 A/B 至少六个子会话，不含首次主代理盲抽，还需主代理比较与复盘；应按可接受成本限制验证规模。长文本仍受所选模型窗口约束，关闭会话压缩不会扩大窗口。实际用量缺失不能按零费用计算。
 
 旧反馈、人工来源确认、离线断言、评测后手动发布与撤回继续兼容；旧断言不生成模型输出，不能代替 agent 自动晋级的独立试验门槛。人工直发使用独立审核记录，不借用旧评测报告。详见[经验维护说明](.opencode/skills/term-extract/references/experience.md)。
+
+## 评测集怎么准备
+
+日常推荐导入**原文 JSON＋可信完整七字段标签＋案例族 family＋用途 split**，再由 OpenCode 组织原生验证；不需要填写网页“离线评测清单 JSON”。同模板、译文和近重复文档归同一 family，保留测试不参与经验归纳或晋级。
+
+每条待验证经验至少覆盖其全部开发来源、独立回归和独立反例，回归与反例来自另外两个独立 family。反例应真正触及该规则的适用或排除条件；三个角色只是最小门槛，不代表已经充分验证真实效果。
+
+网页的清单路径属于兼容离线维护：你已经有 baseline / candidate 输出时，用 manifest 指定索引、两组结果和关键参数断言，评测器只比较文件，不运行模型。它不是原文路径，也不是 `labels.json`。仓库提供[可运行的合成示例](examples/evaluation/README.md)，隔离准备后会打印可填写的 manifest 绝对路径；不要把示例用于生产候选。
+
+详细数据目录、完整标签与断言的区别、可复制的 OpenCode 提示词和两条路线见[评测集准备与经验验证指南](docs/evaluation-guide.md)。
 
 ## 软件检查与效果评估
 

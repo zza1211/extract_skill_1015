@@ -1,4 +1,4 @@
-# 标签学习与独立验证（0.6.2）
+# 标签学习与独立验证（0.6.3）
 
 ## 编排职责
 
@@ -24,6 +24,8 @@
 只对新的、值得保留的候选做验证。先用 term_memory_show 查看本次候选，term_learning_cases / case_preview 按需找相关案例。用户明确提供的其他正确标签可用 term_learning_import_case 归档为 development、regression 或 holdout；标签不重复走旧人工确认。预览不提供标签，也不计作独立试验的全文交付。
 
 案例不足或排除条件不清时保留候选并说明缺口，不凑无关案例。至少需要开发目标、独立回归与触及排除边界的反例；回归和反例来自两个独立案例族，且与归纳来源、开发目标独立。同模板、译文、项目变体归同一族。holdout 不参与经验归纳、反复试验或晋级。
+
+评测集材料、文档家族划分和两条评测路线见 [评测准备与示例](../../../../docs/evaluation-guide.md)。这条原生路线接收原文、可信标签及案例角色，不要求用户手写网页中的离线 manifest；不要用合成示例或人工编写的 baseline/candidate 代替真实子会话预测。
 
 用 term_learning_trial_prepare 传候选编号、修订和 cases_json：
 ```json

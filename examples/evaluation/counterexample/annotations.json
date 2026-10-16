@@ -1,0 +1,34 @@
+[
+  {
+    "object_key": "outdoor-ap",
+    "anchor_tag": "<C5>",
+    "required_tags": [
+      "<C5>",
+      "<C6>",
+      "<C7>"
+    ],
+    "forbidden_tags": [
+      "<C8>",
+      "<C9>",
+      "<C10>"
+    ],
+    "quantity": "4台",
+    "clause_category": "normal"
+  },
+  {
+    "object_key": "industrial-switch",
+    "anchor_tag": "<C8>",
+    "required_tags": [
+      "<C8>",
+      "<C9>",
+      "<C10>"
+    ],
+    "forbidden_tags": [
+      "<C5>",
+      "<C6>",
+      "<C7>"
+    ],
+    "quantity": "2台",
+    "clause_category": "normal"
+  }
+]

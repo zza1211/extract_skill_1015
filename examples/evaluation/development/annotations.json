@@ -1,0 +1,30 @@
+[
+  {
+    "object_key": "indoor-ap",
+    "anchor_tag": "<C1>",
+    "required_tags": [
+      "<C1>",
+      "<C5>",
+      "<C7>"
+    ],
+    "forbidden_tags": [
+      "<C8>",
+      "<C9>"
+    ],
+    "quantity": "12台",
+    "clause_category": "normal"
+  },
+  {
+    "object_key": "firewall",
+    "anchor_tag": "<C8>",
+    "required_tags": [
+      "<C8>",
+      "<C9>"
+    ],
+    "forbidden_tags": [
+      "<C7>"
+    ],
+    "quantity": "1台",
+    "clause_category": "normal"
+  }
+]

@@ -794,6 +794,7 @@ function evaluationView(d) {
   const evaluated = el("section", "publication-route evaluated-route", null,
     el("h3", null, "评测通过后发布"),
     el("p", null, "此路径保留原有来源核验、独立评测和发布门槛。以下未完成事项仅限制评测发布，不限制上方的人工审核发布。"),
+    note("推荐：交给 OpenCode 组织评测", "提供原文、同一套定位标签的可信结果及案例族，让 term-extractor 先独立抽取，再对照标签、归纳经验并组织独立 A/B 验证。案例不足时保留候选。这条路线无需填写下面的离线清单框。"),
   );
   if (d.blockers.length)
     evaluated.append(
@@ -834,23 +835,25 @@ function evaluationView(d) {
     "form",
     "form-card",
     null,
-    el("h3", null, "执行离线评测"),
+    el("h3", null, "离线评测清单（已有两组抽取结果）"),
     el(
       "p",
       null,
-      "先准备真实 baseline、candidate 与人工断言清单。这里检查已有工件，不运行抽取模型。",
+      "这是手动准备已有工件的兼容入口：无候选经验的 baseline 结果、加入此版本经验的 candidate 结果，以及人工断言。提交只核验这些文件，不会调用模型生成抽取结果，也不会自动发布。",
     ),
+    evaluationManifestHelp(),
   );
   const manifest = inputField(
     form,
     "manifest_path",
-    "评测清单在本机的路径",
+    "评测清单 manifest.json 的本机路径（非原文或标签文件）",
     "",
     "text",
     true,
   );
   manifest.placeholder = "D:\\私有实验\\manifest.json";
-  submitForm(form, "执行评测", async () => {
+  form.append(el("p", "inline-note", "清单内 index_path、baseline_result_path、candidate_result_path 的相对路径，均相对于 manifest.json 所在目录。请使用当前真实候选的来源与评测工件；格式示例不能作为它的评测证据。"));
+  submitForm(form, "核验已有结果并生成报告", async () => {
     const r = await api("/api/evaluate", {
       memory_id: d.memory.memory_id,
       revision: d.memory.revision,
@@ -887,6 +890,40 @@ function evaluationView(d) {
       "两条路径都会记录发布依据，支持撤回。发布只影响之后新注册的任务；审核通过不代表所有抽取结果都正确。",
     ),
   );
+  return root;
+}
+function evaluationManifestHelp() {
+  const root = el("details", "details-advanced evaluation-help", null,
+    el("summary", null, "查看 manifest.json 示例与评测集准备方法"),
+  );
+  root.append(
+    el("p", null, "评测单位是独立标书或案例，不是从同一篇标书拆出的几个设备。先按模板、来源或项目族分组，避免相似材料同时承担经验来源和独立回归。"),
+    el("ul", null, null,
+      el("li", null, "fix：已确认纠错来源的开发案例，要求原错误得到改善。下方格式示例采用此角色。"),
+      el("li", null, "success：已确认成功来源的开发案例，要求原本正确的行为继续保持；成功经验应选此角色，不能冒充 fix 改善。"),
+      el("li", null, "regression：其他案例族的可信案例，检查已有正确抽取没有退化。"),
+      el("li", null, "counterexample：另一独立案例族中看似相似、但不应套用该规则的案例，验证排除条件。"),
+    ),
+    el("p", null, "每个案例准备带 Cxx 的原文索引、baseline/candidate 两份实际结果，以及 required_tags（必须覆盖）、forbidden_tags（不得混入）和数量等断言。断言需覆盖关键选型参数与目标产品，不能只靠标题或分类。"),
+    el("p", null, "下面是格式示意，不含可运行的配套索引。要完整演练，可在项目根运行下方命令；它会在仓库外空目录创建合成案例与独立演示库，默认不执行评测、不发布。按命令输出打开演示工作台，并填写生成的 evaluation.manifest.json；不要将演示清单用于当前真实候选。"),
+    el("pre", "json-block", 'python examples/evaluation/prepare_demo.py --out-dir "D:\\私有数据\\term-eval-demo"'),
+  );
+  const example = el("pre", "json-block", "展开后加载格式示例……");
+  root.append(el("h4", null, "manifest.example.json（仅格式示意）"), example);
+  let loading = false;
+  let loaded = false;
+  root.addEventListener("toggle", async () => {
+    if (!root.open || loading || loaded) return;
+    loading = true;
+    try {
+      example.textContent = pretty(await api("/examples/evaluation/manifest.example.json"));
+      loaded = true;
+    } catch (error) {
+      example.textContent = `示例加载失败：${error.message}。可在项目 examples/evaluation/manifest.example.json 查看原文件。`;
+    } finally {
+      loading = false;
+    }
+  });
   return root;
 }
 async function openEvaluation(id) {

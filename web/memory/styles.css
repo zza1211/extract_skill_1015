@@ -1942,3 +1942,11 @@ code,
 .review-source > summary { cursor:pointer; font-size:13px; overflow-wrap:anywhere; }
 .review-source-body { margin-top:14px; max-height:460px; overflow:auto; padding-right:8px; }
 .review-source-body .metadata { font-size:12px; }
+.evaluation-help { padding:12px 14px; background:#fffdf8; border:1px solid #dfd3be; border-radius:6px; font-size:12px; line-height:1.8; color:#6f6047; }
+.evaluation-help > summary { font-weight:600; color:#7a6037; margin-bottom:0; }
+.evaluation-help[open] > summary { margin-bottom:12px; }
+.evaluation-help p, .evaluation-help ul { margin:10px 0; }
+.evaluation-help ul { padding-left:21px; }
+.evaluation-help li + li { margin-top:5px; }
+.evaluation-help h4 { margin:14px 0 8px; font-size:12px; }
+.evaluation-help .json-block { max-height:430px; overflow:auto; }

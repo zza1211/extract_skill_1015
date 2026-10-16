@@ -21,6 +21,9 @@ STATIC_FILES = {
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
+PUBLIC_EXAMPLES = {
+    "/examples/evaluation/manifest.example.json": "examples/evaluation/manifest.example.json",
+}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
        "img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; "
        "frame-ancestors 'none'; object-src 'none'")
@@ -219,6 +222,12 @@ class MemoryHandler(BaseHTTPRequestHandler):
                 if not file.is_relative_to(web_root) or not file.is_file():
                     raise RequestError("静态页面文件不存在。", 404)
                 self._send(200, file.read_bytes(), content_type)
+            elif path in PUBLIC_EXAMPLES:
+                project_root = self.server.project_root.resolve()
+                file = (project_root / PUBLIC_EXAMPLES[path]).resolve()
+                if not file.is_relative_to(project_root) or not file.is_file():
+                    raise RequestError("示例清单不存在。", 404)
+                self._send(200, file.read_bytes(), "application/json; charset=utf-8")
             else:
                 raise RequestError("页面或接口不存在。", 404)
         except RequestError as error:

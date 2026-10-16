@@ -94,6 +94,30 @@ class MemoryUITests(unittest.TestCase):
         self.assertEqual(self.request(path="/favicon.svg")[0], 404)
         self.assertEqual(self.request(path="/memory.sqlite3")[0], 404)
 
+    def test_evaluation_example_is_exact_read_only_public_file(self):
+        example = self.root / "examples" / "evaluation" / "manifest.example.json"
+        example.parent.mkdir(parents=True)
+        value = {"schema_version": 1, "cases": [], "说明": "合成示例"}
+        example.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        (example.parent / "private.json").write_text('{"secret":true}', encoding="utf-8")
+        route = "/examples/evaluation/manifest.example.json"
+        self.server.read_only = True
+        status, headers, raw = self.request(path=route)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw), value)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        for path in ("/examples/evaluation/private.json", "/examples/evaluation/prepare_demo.py",
+                     "/examples/evaluation/", "/examples/evaluation/../private.json"):
+            with self.subTest(path=path):
+                self.assertIn(self.request(path=path)[0], (400, 404))
+        self.assertEqual(self.post(path=route)[0], 403)
+        self.server.read_only = False
+        self.assertEqual(self.post(path=route)[0], 404)
+        example.unlink()
+        self.assertEqual(self.request(path=route)[0], 404)
+        self.assertFalse(self.private.exists())
+
     def test_host_and_origin_are_checked_before_dispatch(self):
         self.server.service = EchoService()
         for host in ("evil.example", "127.0.0.1:1", self.authority + ".evil.example", "localhost"):

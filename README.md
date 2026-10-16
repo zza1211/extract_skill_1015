@@ -1,6 +1,6 @@
 # 条款抽取 Skill POC
 
-**0.6.3：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆，不发起模型调用。暂不引入向量模型。
+**0.6.4：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆，不发起模型调用。暂不引入向量模型。
 
 先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；评测集准备、原生验证流程及前端清单框见[评测指南](docs/evaluation-guide.md)，网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
 
@@ -83,6 +83,8 @@ python -X utf8 .opencode/skills/term-extract/scripts/memory_ui.py
 ## 输入与输出
 
 输入为按原文顺序排列的 `text / table` 对象数组，Cxx 直接位于段落和单元格字符串中。多个真实标签可由准备工具拆成定位单元；生产输入缺少真实标签会报错，详见[输入格式](.opencode/skills/term-extract/references/input-format.md)。
+
+合并单元格展开后可以保留重复 C 标签：同一明确合并范围内、与左上角完整带标签字符串逐字符一致的副本，注册为同一逻辑单元的坐标别名。原文及合并范围保留，不重排标签、不改变正确标签；没有合并关系、跨表或内容不同的重复仍报错。首次使用此类输入需用新工作目录 prepare，已有任务不自动修改。[合并单元格示例](examples/merged-cells/README.md)提供可复制数据和命令。
 
 最终为七字段 JSON 数组：`id`、`条款标题`、`条款分类`、`相关条款`、`产品分类`、`定位标识`、`产品数量`。产品分类仅参考；质量重点是目标设备齐全、选型参数完整、不混入其他设备参数、数量和关系正确。机柜与布线不抽取，纯品牌准入不单独抽为 general；连续表格两行不因此成为 separate。完整口径见 [business-rules.md](.opencode/skills/term-extract/references/business-rules.md)。
 

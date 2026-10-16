@@ -4,7 +4,7 @@
 
 输入是有序数组，块形如 `{"text":"原文"}` 或 `{"table":{"rows":[["单元格原文"]],"merges":[...]}}`。文本、空单元格、每行列数、行列位置、表格次序及 merges 均保留。坐标和 block_index 从 0 开始；原文顺序为顶层块顺序，表格内部为行优先顺序，**不能按 Cxx 数字重新排序**。
 
-生产输入的每个非空 text 字符串或单元格至少包含一个 `<C数字>` 标签，允许一个字符串中含多个标签；所有主文本标签全篇唯一，`<C0>` 合法。空字符串/仅空白字符串可无标签，但仍保留单位。merges 中重复的单元格值属于布局元数据，不再作为另一份定位标签计数。
+生产输入的每个非空 text 字符串或单元格至少包含一个 `<C数字>` 标签，允许一个字符串中含多个标签；`<C0>` 合法。同一文档中，一个标签只能指向一份逻辑原文；不同文档可以重复使用同名标签。空字符串/仅空白字符串可无标签，但仍保留单位。merges 中重复的单元格值属于布局元数据，不再作为另一份定位标签计数。
 
 注册时只在内部建立定位单元：单标签保留整个原字符串，兼容标签位于开头或末尾；多标签按出现顺序切分，从当前标签起点到下一个标签起点（最后到字符串末尾），首片同时保留首标签之前的所有字符。切分不删除换行、不改正文、不生成新标签。片段仍属于原 text 块或同一个表格单元格，不等于多个设备或多个条款；产品归属由主 agent 结合上下文判断。对多标签且标签写在内容末尾的其他解析约定，需先确认定位语义。
 
@@ -16,6 +16,41 @@
   {"table": {"rows": [["<C3>项目\n<C4>编号", "<C5>AP要求\n<C6>支持Wi-Fi 7"]], "merges": []}}
 ]
 ```
+
+## 合并单元格的重复标签
+
+解析器把合并单元格的原文展开到多个位置时，可以保留原标签，不必重排。注册只在以下条件全部满足时，把展开位置登记为左上角单元格的坐标别名：
+
+- 重复发生在同一个表格，并由明确的 `merges` 范围连接；范围使用从 0 开始的 `top_left.row / top_left.col` 和正整数 `row_span / col_span`。
+- 左上角单元格包含真实标签；展开副本与它的**整个原字符串逐字符相同**，包括标签、空格和换行。多标签单元格也必须整串一致。
+- 用来解释重复的合并范围合法、不越界且不重叠。不能仅凭内容相同推断合并关系。
+
+例如，下面两行的 `<C4>` 是同一个纵向合并单元格：
+
+```json
+[
+  {"text": "<C0>交换机采购要求"},
+  {"table": {
+    "rows": [
+      ["<C1>设备", "<C2>技术参数", "<C3>采购数量"],
+      ["<C4>接入交换机", "<C5>24个GE口", "<C6>2台"],
+      ["<C4>接入交换机", "<C7>支持双电源", "<C8>数量为上述设备总量"]
+    ],
+    "merges": [{
+      "top_left": {"row": 1, "col": 0},
+      "row_span": 2,
+      "col_span": 1,
+      "value": "<C4>接入交换机"
+    }]
+  }}
+]
+```
+
+原始 rows 和 merges 均保留。`(2,0)` 复用锚点 `(1,0)` 的定位单元；`<C4>` 只计一次，定位顺序仍为 `<C0>` 至 `<C8>`，不会因第二次出现而把 `<C4>` 的位置延到第二行。读取或搜索时保留别名与合并范围，供主 agent 判断行列归属；这也不构成 separate 的依据。
+
+不同段落、跨表、没有明确合并关系、同标签不同内容，以及同一个字符串内部的重复标签仍会报错。用于解释重复的合并范围无效或重叠时也会报错。不要删掉重复检查，不要自行改标签后继续沿用旧标签答案。
+
+完整文件及准备命令见 [合并单元格示例](../../../../examples/merged-cells/README.md)。
 
 ## 命令
 
@@ -48,9 +83,15 @@ compact 读取响应还包含计入字节预算的 `next_action`：有后续片�
 
 tables 保留原始 rows、原始 merges；`cell_unit_ids[row][col]` 是该单元格所有定位片段的 unit_id 数组，二维 `unit_ids` 仅保留每个单元格的首片作兼容引用。不能用首片代表整个多标签单元格，也不把相同 CAT 值去重或广播。`manifest.json` 含 source_sha256、index_sha256、单位/标签计数、demo/production_submittable、分页清单。每片是 `view-NNNN.json`，包含 cursor、next_cursor、覆盖元数据和完整原文片段。
 
+存在上述合并副本时，schema 2 索引还包含 `merged_cell_alias_policy="exact_merged_cell_v1"` 和 `merged_cell_aliases` 坐标别名列表；副本的 `cell_unit_ids` / `unit_ids` 复用锚点引用，`tag_to_unit` 仍为唯一映射。别名不创建新的定位单元、不重复计算读取覆盖，也不按最后出现位置扩大条款区间。完整 `source_document`、表格 rows / merges 不变，读取和搜索返回相关别名与合并上下文。
+
+读取的 table_context 通过 `merged_cell_alias_count` 说明该表的副本数；`cell_aliases` 只列本片可见行、已交付列范围及紧邻列的副本坐标和 `value_from_cell`，完整别名保存在索引。合并的完整范围仍由 merges 提供，避免每一页都重复输出跨大量行列的副本清单。
+
 版本 1 索引与新定位粒度不兼容，读取时会明确拒绝；使用原始输入重新 prepare，不手动修改旧索引或沿用旧读取回执。最终七字段结果接口不变。
 
-prepare 的 stdout 返回 index_path、manifest_path、view_paths、view_count、view_paths_complete、demo、production_submittable、index_hash、unit_count、tag_count、byte_size。通常 view_paths 完整；列表太长时仅返回前四个路径，并明确 view_paths_complete=false/all_view_paths_in_manifest=true，完整列表仍在 manifest，继续读取使用 cursor 不受影响。prepare 的完整 stdout 同样不超过 24 KiB。
+0.6.4 的合并别名支持兼容原先没有重复标签的 schema 2 索引；已有任务不自动迁移。此前因合并副本重复标签而失败的输入，更新代码后使用**新的工作目录**重新 prepare，不重排原标签，也不修改对应正确标签或历史输出。
+
+prepare 的 stdout 返回 index_path、manifest_path、view_paths、view_count、view_paths_complete、demo、production_submittable、index_hash、unit_count、tag_count、merged_cell_alias_count、byte_size。merged_cell_alias_count 是本次确认的合并副本坐标数，unit_count / tag_count 按去重后的逻辑原文计数；OpenCode 注册工具也返回这三个计数。通常 view_paths 完整；列表太长时仅返回前四个路径，并明确 view_paths_complete=false/all_view_paths_in_manifest=true，完整列表仍在 manifest，继续读取使用 cursor 不受影响。prepare 的完整 stdout 同样不超过 24 KiB。
 
 `--demo-tags` 只生成 `source.demo.json` 工作副本，绝不改输入文件。demo=true、production_submittable=false；即使只有部分标签被补充，该整次运行也不能生产提交。当前 example 无真实标签，只能用演示模式。
 

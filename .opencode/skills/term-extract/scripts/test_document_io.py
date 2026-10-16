@@ -1,5 +1,6 @@
 """验证原文保真、定位与分页边界；无需网络或额外依赖。"""
 
+import copy
 import json
 import subprocess
 import sys
@@ -129,6 +130,148 @@ class DocumentIOTests(unittest.TestCase):
                 self.prepare([{"text": text}])
         with self.assertRaisesRegex(doc.DocumentError, "重复"):
             self.prepare([{"text": "a<C1>"}, {"table": {"rows": [["<C1>b"]], "merges": []}}])
+
+    def merged_source(self):
+        shared = "<C3>接口要求\n<C4>供电要求"
+        return [{"table": {
+            "rows": [["<C90>总要求", shared, shared, ""],
+                     ["<C8>设备名称", "<C9>本设备参数", "<C10>说明", ""],
+                     ["<C8>设备名称", "<C2>下一设备", "<C1>另一设备参数", ""]],
+            "merges": [{"top_left": {"row": 0, "col": 1}, "row_span": 1, "col_span": 2, "value": shared},
+                       {"top_left": {"row": 1, "col": 0}, "row_span": 2, "col_span": 1}],
+        }}]
+
+    def test_horizontal_vertical_multitag_aliases_preserve_source_and_layout(self):
+        source = self.merged_source()
+        result = self.prepare(source)
+        index, _ = doc.load_index(Path(result["index_path"]))
+        self.assertEqual(index["source_document"], source)
+        self.assertEqual(index["tables"][0]["rows"], source[0]["table"]["rows"])
+        self.assertEqual(index["merged_cell_alias_policy"], "exact_merged_cell_v1")
+        self.assertEqual(index["merged_cell_aliases"], [
+            {"block_index": 0, "row": 0, "col": 2, "anchor_row": 0, "anchor_col": 1, "merge_index": 0},
+            {"block_index": 0, "row": 2, "col": 0, "anchor_row": 1, "anchor_col": 0, "merge_index": 1}])
+        self.assertEqual(result["tag_count"], 8)
+        self.assertEqual(result["unit_count"], 11)  # 三个空位置也保留。
+        self.assertEqual([u["tag"] for u in index["units"] if u["tag"]],
+                         ["<C90>", "<C3>", "<C4>", "<C8>", "<C9>", "<C10>", "<C2>", "<C1>"])
+        cells = index["tables"][0]["cell_unit_ids"]
+        self.assertEqual(cells[0][1], cells[0][2])
+        self.assertEqual(len(cells[0][2]), 2)
+        self.assertEqual(cells[1][0], cells[2][0])
+        for view in ("machine", "compact"):
+            pages = self.collect(Path(result["index_path"]), max_bytes=4096, view=view)
+            self.assertEqual(self.reconstructed(pages), {u["unit_id"]: u["source_text"] for u in index["units"]})
+            contexts = [context for page in pages for context in (page["model_view"]["table_context"] if view == "compact" else page["table_context"])]
+            self.assertTrue(any(context.get("cell_aliases") for context in contexts))
+        self.assertEqual(json.loads((self.root / "input.json").read_text(encoding="utf-8")), source)
+
+    def test_vertical_alias_never_moves_tag_endpoint_or_search_hit_count(self):
+        result = self.prepare(self.merged_source())
+        path = Path(result["index_path"])
+        page = doc.read_document(path, start="<C8>", end="<C8>", view="compact")
+        self.assertEqual(page["tags"], ["<C8>"])
+        self.assertNotIn("下一设备", page["text"])
+        search = doc.search_document(path, "设备名称", neighbors=0, view="compact")
+        self.assertEqual(search["match_count_total"], 1)
+        self.assertEqual(search["model_view"]["matched_tags"], ["<C8>"])
+
+    def test_long_merged_anchor_is_read_once_with_lossless_unicode_pagination(self):
+        shared = "<C30>接口🌐及供电。" + "长段原文🌐\n" * 400
+        result = self.prepare([{"table": {"rows": [[shared, shared]], "merges": [
+            {"top_left": {"row": 0, "col": 0}, "row_span": 1, "col_span": 2}]}}])
+        path = Path(result["index_path"])
+        pages = self.collect(path, max_bytes=2048, view="compact")
+        self.assertGreater(len(pages), 1)
+        self.assertEqual(self.reconstructed(pages), {"u000001": shared})
+
+    def test_large_vertical_merge_does_not_repeat_all_alias_coordinates_in_each_page(self):
+        result = self.prepare([{"table": {"rows": [["<C1>共同要求"] for _ in range(1000)], "merges": [
+            {"top_left": {"row": 0, "col": 0}, "row_span": 1000, "col_span": 1}]}}])
+        self.assertEqual(result["unit_count"], 1)
+        self.assertEqual(result["merged_cell_alias_count"], 999)
+        pages = self.collect(Path(result["index_path"]), max_bytes=2048, view="compact")
+        self.assertEqual(len(pages), 1)
+        context = pages[0]["model_view"]["table_context"][0]
+        self.assertEqual(context["merged_cell_alias_count"], 999)
+        self.assertEqual(context["merges"][0]["row_span"], 1000)
+        self.assertNotIn("cell_aliases", context)
+
+    def test_wide_horizontal_merge_keeps_read_budget_and_neighbor_alias_reference(self):
+        result = self.prepare([{"table": {"rows": [["<C1>共同要求"] * 1000 + ["<C2>下一设备"]], "merges": [
+            {"top_left": {"row": 0, "col": 0}, "row_span": 1, "col_span": 1000}]}}])
+        self.assertEqual(result["unit_count"], 2)
+        pages = self.collect(Path(result["index_path"]), max_bytes=2048, view="compact")
+        self.assertEqual(self.reconstructed(pages), {"u000001": "<C1>共同要求", "u000002": "<C2>下一设备"})
+        self.assertTrue(all(len(page["model_view"]["table_context"][0].get("cell_aliases", [])) <= 2 for page in pages))
+
+    def test_duplicate_alias_requires_complete_string_equality_and_explicit_merge(self):
+        base = [{"table": {"rows": [["<C1>名称", "<C1>名称"]], "merges": [
+            {"top_left": {"row": 0, "col": 0}, "row_span": 1, "col_span": 2}]}}]
+        cases = []
+        missing = copy.deepcopy(base)
+        missing[0]["table"]["merges"] = []
+        cases.append(missing)
+        different = copy.deepcopy(base)
+        different[0]["table"]["rows"][0][1] += " "
+        cases.append(different)
+        cases.append([{"text": "<C1>名称<C1>名称"}])
+        cases.append([{"table": {"rows": [["<C1>名称"]]}}, {"table": {"rows": [["<C1>名称"]]}}])
+        # 合并区域中出现另一个不同非空内容，不能以部分副本冒充整格。
+        inconsistent = copy.deepcopy(base)
+        inconsistent[0]["table"]["rows"][0].append("<C2>不同设备")
+        inconsistent[0]["table"]["merges"][0]["col_span"] = 3
+        cases.append(inconsistent)
+        for source in cases:
+            with self.subTest(source=source), self.assertRaisesRegex(doc.DocumentError, "重复"):
+                self.prepare(source)
+
+    def test_invalid_or_overlapping_merge_cannot_prove_duplicate_tags(self):
+        merge = {"top_left": {"row": 0, "col": 0}, "row_span": 1, "col_span": 2}
+        bad = [dict(merge, col_span=3), dict(merge, row_span=True), dict(merge, row_span=0),
+               dict(merge, col_span=2.0), dict(merge, top_left={"row": -1, "col": 0})]
+        for item in bad:
+            with self.subTest(merge=item), self.assertRaisesRegex(doc.DocumentError, "重复"):
+                self.prepare([{"table": {"rows": [["<C1>x", "<C1>x"]], "merges": [item]}}])
+        for extra in (merge, {"top_left": {"row": 0, "col": 1}, "row_span": 1, "col_span": 1}):
+            with self.subTest(extra=extra), self.assertRaisesRegex(doc.DocumentError, "重复"):
+                self.prepare([{"table": {"rows": [["<C1>x", "<C1>x"]], "merges": [merge, extra]}}])
+        with self.assertRaisesRegex(doc.DocumentError, "重复"):
+            self.prepare([{"table": {"rows": [["<C1>x", "<C2>y"], ["<C1>x"]],
+                "merges": [{"top_left": {"row": 0, "col": 0}, "row_span": 2, "col_span": 2}]}}])
+
+    def test_alias_validation_rejects_tampering_even_when_outer_hash_is_updated(self):
+        result = self.prepare(self.merged_source())
+        path = Path(result["index_path"])
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for field in ("merged_cell_aliases", "merged_cell_alias_policy", "tables", "units", "tag_to_unit"):
+            changed = copy.deepcopy(original)
+            if field in ("merged_cell_aliases", "merged_cell_alias_policy"):
+                changed.pop(field)
+            elif field == "tables":
+                changed[field][0]["cell_unit_ids"][2][0] = changed[field][0]["cell_unit_ids"][2][1]
+            elif field == "units":
+                changed[field][0]["source_text"] = "伪造原文"
+            else:
+                changed[field]["<C8>"] = changed[field]["<C2>"]
+            with self.subTest(field=field), self.assertRaises(doc.DocumentError):
+                doc.validate_merged_aliases(changed)
+            path.write_bytes(doc.json_bytes(changed))
+            with self.assertRaises(doc.DocumentError):
+                doc.load_index(path)
+
+    def test_no_alias_keeps_legacy_schema_and_demo_with_aliases_is_explicit(self):
+        result = self.prepare([{"table": {"rows": [["<C1>同名", "<C2>同名"]],
+            "merges": [{"raw_legacy_metadata": "尚未标准化的历史布局"}]}}])
+        index, _ = doc.load_index(Path(result["index_path"]))
+        self.assertNotIn("merged_cell_aliases", index)
+        self.assertEqual(result["tag_count"], 2)
+        source = self.merged_source() + [{"text": "没有标签的演示内容"}]
+        result = self.prepare(source, demo=True)
+        index, _ = doc.load_index(Path(result["index_path"]))
+        self.assertTrue(index["demo"])
+        self.assertFalse(index["production_submittable"])
+        self.assertEqual(len(index["merged_cell_aliases"]), 2)
 
     def test_range_uses_source_order_and_empty_cell_kept(self):
         result = self.prepare([{"text": "正文<C99>"}, {"table": {"rows": [["<C2>参数", ""]], "merges": []}}, {"text": "<C1>末段"}])

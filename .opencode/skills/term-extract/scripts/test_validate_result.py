@@ -1,6 +1,7 @@
 """重点回归输出契约与不应由结构检查冒充的业务判断。"""
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import sys
@@ -58,6 +59,25 @@ def wifi_layout_fixture() -> dict:
 
 
 class ResultValidationTests(unittest.TestCase):
+    def test_prepared_merged_alias_proof_is_required_for_result_validation(self):
+        import document_io
+        with tempfile.TemporaryDirectory(prefix="term-merged-validator-") as folder:
+            root = Path(folder)
+            source = [{"table": {"rows": [["<C100>设备", "<C2>参数"], ["<C100>设备", "<C9>另一设备"]],
+                "merges": [{"top_left": {"row": 0, "col": 0}, "row_span": 2, "col_span": 1}]}}]
+            path = root / "input.json"
+            path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+            prepared = document_io.prepare(path, root / "prepared")
+            index = json.loads(Path(prepared["index_path"]).read_text(encoding="utf-8"))
+            self.assertTrue(validate_result(index, [clause()])["ok"])
+            changed = copy.deepcopy(index)
+            changed.pop("merged_cell_aliases")
+            changed.pop("merged_cell_alias_policy")
+            self.assertIn("INDEX_MERGED_ALIAS_INVALID", codes(validate_result(changed, [clause()])))
+            changed = copy.deepcopy(index)
+            changed["units"][0]["source_text"] = "伪造的锚点内容"
+            self.assertIn("INDEX_MERGED_ALIAS_INVALID", codes(validate_result(changed, [clause()])))
+
     def test_valid_result_and_semantic_notice(self):
         report = validate_result(index_fixture(), [clause()])
         self.assertTrue(report["ok"])

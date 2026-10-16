@@ -18,6 +18,8 @@ def load_json(path: Path):
 
 def coverage_report(index_path: Path, receipts_path: Path) -> dict:
     index = load_json(index_path)
+    from document_io import validate_merged_aliases
+    validate_merged_aliases(index)
     fingerprint = hashlib.sha256(index_path.read_bytes()).hexdigest()
     units = index.get("units", [])
     expected = {}
@@ -67,6 +69,7 @@ def coverage_report(index_path: Path, receipts_path: Path) -> dict:
     return {
         "complete": not invalid and not missing,
         "unit_count": len(expected),
+        "merged_cell_alias_count": len(index.get("merged_cell_aliases", [])),
         "receipt_count": receipt_count,
         "missing_count": len(missing),
         "missing_units": missing[:30],
@@ -141,7 +144,7 @@ def main() -> int:
             "status": "demo_submitted" if demo else "submitted",
             "production_submittable": not demo,
             "model_id": args.model_id,
-            "skill_version": "0.6.3",
+            "skill_version": "0.6.4",
             "skill_sha256": hashlib.sha256(skill_path.read_bytes()).hexdigest(),
             "reference_sha256": reference_hashes,
             "source_path": index.get("source_path"),

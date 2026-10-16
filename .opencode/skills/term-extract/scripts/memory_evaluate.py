@@ -131,7 +131,9 @@ def _index(path: Path, artifacts: Artifacts) -> tuple[dict, dict[str, int], bool
             raise EvaluationError(f"索引不匹配原始输入源码：{source_path}")
     snapshot = index.get("source_document")
     try:
-        locations = document_io.check_input(snapshot)
+        # 从原文及合并范围重新证明别名，不能信任索引自报的去重结果。
+        locations, _ = document_io.logical_locations(snapshot)
+        document_io.validate_merged_aliases(index)
     except (ValueError, TypeError) as error:
         raise EvaluationError(f"索引原文快照不合法：{error}") from error
     expected = []

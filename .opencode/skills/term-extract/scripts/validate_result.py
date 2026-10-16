@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import document_io
+
 FIELDS = frozenset({
     "id", "条款标题", "条款分类", "相关条款", "产品分类", "定位标识", "产品数量",
 })
@@ -72,6 +74,13 @@ def _build_tag_order(index: Any, report: dict, allow_demo: bool) -> dict[str, in
     report["production_submittable"] = bool(submittable and not demo)
     if isinstance(index.get("source_sha256"), str):
         report["source_sha256"] = index["source_sha256"]
+    # 旧的最小结构索引没有原文快照；带快照或别名声明的索引必须核验证明。
+    if ("source_document" in index or "merged_cell_aliases" in index
+            or "merged_cell_alias_policy" in index):
+        try:
+            document_io.validate_merged_aliases(index)
+        except (ValueError, TypeError) as error:
+            _add(report, "errors", "INDEX_MERGED_ALIAS_INVALID", str(error), "index.merged_cell_aliases")
 
     units = index.get("units")
     if not isinstance(units, list):

@@ -18,6 +18,7 @@ MAX_BYTES = 24 * 1024
 MAX_IPC_BYTES = 1024 * 1024
 MAX_COMPACT_UNITS = 512
 TAG_RE = re.compile(r"<C[0-9]+>")
+MERGED_ALIAS_POLICY = "exact_merged_cell_v1"
 
 
 class DocumentError(ValueError):
@@ -89,11 +90,133 @@ def source_segments(text: str) -> list[tuple[int, int, str | None, int | None]]:
             for position, match in enumerate(matches)]
 
 
+def _merge_rectangle(merge: Any) -> tuple[int, int, int, int] | None:
+    if not isinstance(merge, dict) or not isinstance(merge.get("top_left"), dict):
+        return None
+    origin = merge["top_left"]
+    row, col = origin.get("row"), origin.get("col")
+    height, width = merge.get("row_span", 1), merge.get("col_span", 1)
+    if any(type(value) is not int for value in (row, col, height, width)):
+        return None
+    if row < 0 or col < 0 or height < 1 or width < 1:
+        return None
+    return row, col, row + height, col + width
+
+
+def logical_locations(source: Any) -> tuple[list[tuple], list[dict]]:
+    """仅折叠明确合并范围内的精确副本；其他原文与空位置原样保留。"""
+    locations = check_input(source)
+    occurrences: dict[str, list[tuple]] = {}
+    for block, kind, row, col, text in locations:
+        for match in TAG_RE.finditer(text):
+            occurrences.setdefault(match.group(), []).append((block, kind, row, col, text, match.start()))
+    aliases: dict[tuple, dict] = {}
+    for tag, found in occurrences.items():
+        if len(found) == 1:
+            continue
+        places = {(item[0], item[2], item[3]) for item in found}
+        explanation = "；".join(f"块 {b}、行 {r}、列 {c}、字符 {offset}" for b, _, r, c, _, offset in found[:4])
+        def reject(reason):
+            raise DocumentError(f"标签 {tag} 重复（{explanation}）：{reason}。不同逻辑原文的标签必须唯一。")
+        if len(places) != len(found) or any(item[1] != "cell" for item in found) or len({item[0] for item in found}) != 1:
+            reject("不是同一表格内不同坐标的合并副本")
+        if any(item[4] != found[0][4] for item in found):
+            reject("同标签对应的单元格原字符串不一致")
+        block = found[0][0]
+        table = source[block]["table"]
+        rows = table["rows"]
+        rectangles = [_merge_rectangle(merge) for merge in table.get("merges", [])]
+        candidates = []
+        for number, rect in enumerate(rectangles):
+            if rect is None:
+                continue
+            r0, c0, r1, c1 = rect
+            if r1 > len(rows) or any(c1 > len(rows[r]) for r in range(r0, r1)):
+                continue
+            if all(r0 <= r < r1 and c0 <= c < c1 for _, r, c in places) and rows[r0][c0] == found[0][4]:
+                candidates.append((number, rect))
+        if len(candidates) != 1:
+            reject("缺少唯一、合法且覆盖这些位置的 merges 合并范围")
+        number, rect = candidates[0]
+        r0, c0, r1, c1 = rect
+        for other, other_rect in enumerate(rectangles):
+            if other == number or other_rect is None:
+                continue
+            a, b, z, w = other_rect
+            if max(r0, a) < min(r1, z) and max(c0, b) < min(c1, w):
+                reject("用于解释重复的合并范围与其他合并范围重叠")
+        anchor = rows[r0][c0]
+        for row in range(r0, r1):
+            for col in range(c0, c1):
+                text = rows[row][col]
+                if text.strip() and text != anchor:
+                    reject("合并范围内存在与锚点不一致的非空原文")
+                if (row, col) != (r0, c0) and text == anchor:
+                    aliases[(block, row, col)] = {"block_index": block, "row": row, "col": col,
+                        "anchor_row": r0, "anchor_col": c0, "merge_index": number}
+    ordered = [aliases[key] for key in sorted(aliases)]
+    return [item for item in locations if (item[0], item[2], item[3]) not in aliases], ordered
+
+
+def validate_merged_aliases(index: dict) -> None:
+    """从原文重建别名及坐标映射；兼容不含该扩展的旧索引。"""
+    declared = "merged_cell_aliases" in index or "merged_cell_alias_policy" in index
+    if "source_document" not in index:
+        if declared:
+            raise DocumentError("合并别名索引缺少 source_document 原文证明。")
+        return
+    locations, aliases = logical_locations(index["source_document"])
+    if not aliases and not declared:
+        return
+    def equal(left, right):
+        return json.dumps(left, sort_keys=True, ensure_ascii=False, allow_nan=False) == json.dumps(right, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    if index.get("merged_cell_alias_policy") != MERGED_ALIAS_POLICY or not equal(index.get("merged_cell_aliases"), aliases):
+        raise DocumentError("合并别名声明与原文及 merges 证明不一致，需重新 prepare。")
+    expected = [(block, kind, row, col, text, start, end, tag, offset)
+                for block, kind, row, col, text in locations
+                for start, end, tag, offset in source_segments(text)]
+    units = index.get("units")
+    if not isinstance(units, list) or len(units) != len(expected):
+        raise DocumentError("合并别名索引的逻辑单位数与原文不一致。")
+    by_location: dict[tuple, list[str]] = {}
+    ids = set()
+    for order, (unit, item) in enumerate(zip(units, expected)):
+        block, kind, row, col, text, start, end, tag, offset = item
+        if not isinstance(unit, dict) or not isinstance(unit.get("unit_id"), str) or not unit["unit_id"] or unit["unit_id"] in ids:
+            raise DocumentError("合并别名索引含无效或重复的 unit_id。")
+        ids.add(unit["unit_id"])
+        fields = {"order": order, "block_index": block, "kind": kind, "row": row, "col": col,
+                  "table_id": f"t{block + 1:04d}" if kind == "cell" else None,
+                  "source_text": text[start:end], "source_start": start, "source_end": end,
+                  "source_length": end - start, "source_total_length": len(text),
+                  "tag_offset": offset, "unit_tag_offset": offset - start if offset is not None else None}
+        if tag is not None or not index.get("demo"):
+            fields.update(tag=tag, tags=[tag] if tag else [], text=text[start:end], tag_is_synthetic=False)
+        if any(not equal(unit.get(key), wanted) for key, wanted in fields.items()):
+            raise DocumentError("合并别名索引的逻辑单位与原文切片不一致。")
+        by_location.setdefault((block, row, col), []).append(unit["unit_id"])
+    for alias in aliases:
+        by_location[(alias["block_index"], alias["row"], alias["col"])] = by_location[(alias["block_index"], alias["anchor_row"], alias["anchor_col"])]
+    tables = index.get("tables")
+    source_tables = [(block, item["table"]) for block, item in enumerate(index["source_document"]) if "table" in item]
+    if not isinstance(tables, list) or len(tables) != len(source_tables):
+        raise DocumentError("合并别名索引缺少原始表格映射。")
+    for actual, (block, table) in zip(tables, source_tables):
+        cell_ids = [[by_location[(block, row, col)] for col in range(len(values))] for row, values in enumerate(table["rows"])]
+        fields = {"table_id": f"t{block + 1:04d}", "block_index": block, "rows": table["rows"], "merges": table.get("merges", []),
+                  "cell_unit_ids": cell_ids, "unit_ids": [[ids[0] for ids in row] for row in cell_ids]}
+        if not isinstance(actual, dict) or any(not equal(actual.get(key), wanted) for key, wanted in fields.items()):
+            raise DocumentError("表格坐标及合并别名映射与原文不一致。")
+    expected_tags = {unit["tag"]: unit["unit_id"] for unit in units if unit.get("tag")}
+    if not equal(index.get("tag_to_unit"), expected_tags):
+        raise DocumentError("合并别名索引的 tag_to_unit 与逻辑单位不一致。")
+
+
 def prepare(input_path: Path, out_dir: Path, demo_tags: bool = False) -> dict[str, Any]:
     input_path = input_path.resolve()
     out_dir = out_dir.resolve()
     source, source_bytes = load_json(input_path)
-    locations = check_input(source)
+    locations, aliases = logical_locations(source)
     found: dict[str, str] = {}
     missing = []
     for block_no, kind, row, col, text in locations:
@@ -103,7 +226,7 @@ def prepare(input_path: Path, out_dir: Path, demo_tags: bool = False) -> dict[st
             tag = match.group()
             occurrence = f"{place}、字符 {match.start()}"
             if tag in found:
-                raise DocumentError(f"标签 {tag} 重复：{found[tag]} 与 {occurrence}。标签必须全篇唯一。")
+                raise DocumentError(f"标签 {tag} 重复：{found[tag]} 与 {occurrence}。不同逻辑原文的标签必须唯一。")
             found[tag] = occurrence
         if not matches and text.strip():
             missing.append(place)
@@ -154,6 +277,8 @@ def prepare(input_path: Path, out_dir: Path, demo_tags: bool = False) -> dict[st
             if tag:
                 tag_to_unit[tag] = unit_id
         by_location[(block_no, row, col)] = location_ids
+    for alias in aliases:
+        by_location[(alias["block_index"], alias["row"], alias["col"])] = by_location[(alias["block_index"], alias["anchor_row"], alias["anchor_col"])]
     tables = []
     for block_no, block in enumerate(source):
         if "table" in block:
@@ -174,6 +299,9 @@ def prepare(input_path: Path, out_dir: Path, demo_tags: bool = False) -> dict[st
         "source_document": source, "units": units, "tables": tables,
         "tag_to_unit": tag_to_unit,
     }
+    if aliases:
+        index.update(merged_cell_alias_policy=MERGED_ALIAS_POLICY, merged_cell_aliases=aliases)
+    validate_merged_aliases(index)
     destinations = [out_dir / "index.json", out_dir / "manifest.json"]
     if demo_tags:
         destinations.append(out_dir / "source.demo.json")
@@ -208,6 +336,7 @@ def prepare(input_path: Path, out_dir: Path, demo_tags: bool = False) -> dict[st
         "source_sha256": digest(source_bytes), "index_path": str(index_path),
         "index_sha256": index_hash, "demo": demo_tags, "production_submittable": not demo_tags,
         "unit_count": len(units), "tag_count": len(tag_to_unit),
+        "merged_cell_alias_count": len(aliases),
         "max_view_bytes": MAX_BYTES, "coverage_kind": "full_original", "views": views,
         "demo_source_path": str(out_dir / "source.demo.json") if demo_tags else None,
     }
@@ -219,7 +348,7 @@ def prepare(input_path: Path, out_dir: Path, demo_tags: bool = False) -> dict[st
               "view_paths": [v["path"] for v in views], "view_count": len(views),
               "view_paths_complete": True, "demo": demo_tags,
               "production_submittable": not demo_tags, "index_hash": index_hash,
-              "unit_count": len(units), "tag_count": len(tag_to_unit)}
+              "unit_count": len(units), "tag_count": len(tag_to_unit), "merged_cell_alias_count": len(aliases)}
     if len(sized_bytes(result)) > MAX_BYTES:
         result["view_paths"] = result["view_paths"][:4]
         result["view_paths_complete"] = False
@@ -235,6 +364,7 @@ def load_index(path: Path) -> tuple[dict[str, Any], str]:
         raise DocumentError("索引版本不兼容，请使用 prepare 重新生成。")
     if not isinstance(index.get("units"), list) or not isinstance(index.get("tag_to_unit"), dict):
         raise DocumentError("索引缺少 units 或 tag_to_unit。")
+    validate_merged_aliases(index)
     index_hash = digest(raw)
     manifest_path = path.parent / "manifest.json"
     if manifest_path.exists():
@@ -297,10 +427,28 @@ def table_context(index: dict[str, Any], parts: list[dict[str, Any]]) -> list[di
                 layout["value_source"] = "merge_metadata"
             layout["value_preserved_in_index"] = True
             merges.append(layout)
-        contexts.append({"table_id": table["table_id"], "block_index": table["block_index"],
-                         "row_count": len(table["rows"]), "visible_rows": sorted(visible_rows),
-                         "column_counts": sorted({len(r) for r in table["rows"]}),
-                         "merges": merges, "original_merges_in_index": True})
+        context = {"table_id": table["table_id"], "block_index": table["block_index"],
+                   "row_count": len(table["rows"]), "visible_rows": sorted(visible_rows),
+                   "column_counts": sorted({len(r) for r in table["rows"]}),
+                   "merges": merges, "original_merges_in_index": True}
+        table_aliases = [item for item in index.get("merged_cell_aliases", []) if item["block_index"] == table["block_index"]]
+        columns = {}
+        if table_aliases:
+            for part in parts:
+                if part["table_id"] == table["table_id"]:
+                    bounds = columns.setdefault(part["row"], [part["col"], part["col"]])
+                    bounds[0], bounds[1] = min(bounds[0], part["col"]), max(bounds[1], part["col"])
+        aliases = [{"row": item["row"], "col": item["col"],
+                    "value_from_cell": {"row": item["anchor_row"], "col": item["anchor_col"]},
+                    "merge_index": item["merge_index"]}
+                   for item in table_aliases if item["row"] in visible_rows
+                   and columns[item["row"]][0] - 1 <= item["col"] <= columns[item["row"]][1] + 1]
+        if table_aliases:
+            context["merged_cell_alias_count"] = len(table_aliases)
+            context["merged_cell_alias_policy"] = MERGED_ALIAS_POLICY
+        if aliases:
+            context["cell_aliases"] = aliases
+        contexts.append(context)
     return contexts
 
 
@@ -316,9 +464,14 @@ def compact_table_context(contexts: list[dict[str, Any]]) -> list[dict[str, Any]
             if merge.get("value_in_anchor"):
                 item["value_from_cell"] = merge["top_left"]
             merges.append(item)
-        projected.append({"table_id": context["table_id"], "block_index": context["block_index"],
-                          "row_count": context["row_count"], "column_counts": context["column_counts"],
-                          "merges": merges})
+        result = {"table_id": context["table_id"], "block_index": context["block_index"],
+                  "row_count": context["row_count"], "column_counts": context["column_counts"], "merges": merges}
+        if context.get("cell_aliases"):
+            result["cell_aliases"] = context["cell_aliases"]
+        if context.get("merged_cell_alias_count"):
+            result["merged_cell_alias_count"] = context["merged_cell_alias_count"]
+            result["merged_cell_alias_policy"] = context["merged_cell_alias_policy"]
+        projected.append(result)
     return projected
 
 

@@ -37,7 +37,7 @@ async function hasCandidateCheckpoint(indexPath: string): Promise<boolean> {
 }
 
 export const prepare = tool({
-  description: "注册标书 JSON；允许一个 text 或表格单元格包含多个 Cxx，保留每个标签的位置、表格行列和原文，建立可分页读取的索引。不做语义抽取。",
+  description: "注册标书 JSON；允许一个字符串含多个 Cxx，同一明确合并范围内与锚点完全一致的单元格副本可共用原标签。保留原文和布局、登记逻辑定位及副本坐标，不重排标签；其他重复仍报错。不做语义抽取。",
   args: {
     input_path: tool.schema.string().describe("原始 JSON 文件路径，相对项目根目录或绝对路径"),
     out_dir: tool.schema.string().optional().describe("本次独立工作目录；省略时自动创建 runs 下的新目录"),
@@ -58,6 +58,7 @@ export const prepare = tool({
     const memory = await python(root, "memory_store.py", ["--project-root", root, "create-snapshot", "--index", result.index_path]);
     if (memory.ok === false || memory.error || !memory.snapshot_sha256) throw new Error(memory.error || "无法固定本任务的经验快照。");
     return output({ index_path: result.index_path, manifest_path: result.manifest_path, demo: result.demo, unit_count: result.unit_count, tag_count: result.tag_count,
+      merged_cell_alias_count: result.merged_cell_alias_count ?? 0,
       memory_snapshot: { snapshot_path: memory.snapshot_path, snapshot_sha256: memory.snapshot_sha256, release_sha256: memory.release_sha256,
         memory_count: memory.memory_count ?? memory.memories?.length ?? 0 },
       next_action: "使用 term_document_read 连续读取；原始 Cxx 保持不变。形成候选后，只针对具体疑点调用 term_memory_recall。" });

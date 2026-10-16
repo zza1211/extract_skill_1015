@@ -144,6 +144,109 @@ class MemoryEvaluationTests(unittest.TestCase):
     def candidate_output(self, case_number, records):
         self.write(self.root / self.cases[case_number]["candidate_result_path"], records)
 
+    def use_merged_case(self, case_number):
+        """真实 prepare 合并单元格；三个角色仍使用各自独立的完整输入。"""
+        case = self.cases[case_number]
+        folder = (self.root / case["index_path"]).parent.parent
+        anchor = f"<C90>{case['family_id']} 主体2台"
+        source = [{"table": {
+            "rows": [[anchor, "<C3>关键参数", "<C50>无害冗余"],
+                     [anchor, "<C8>另一设备", "<C2>通用参数"],
+                     ["<C70>分散参数", "<C1>其他通用"]],
+            "merges": [{"top_left": {"row": 0, "col": 0}, "row_span": 2,
+                        "col_span": 1, "value": anchor}],
+        }}]
+        self.write(folder / "source.json", source)
+        prepared = document_io.prepare(folder / "source.json", folder / "prepared")
+        index = json.loads(Path(prepared["index_path"]).read_text(encoding="utf-8"))
+        if case_number == 0:
+            self.store.corrections["corr-dev"].update(source_sha256=index["source_sha256"],
+                                                       input_path=index["source_path"])
+        return index
+
+    def rewrite_prepared_index(self, index, case_number=0):
+        """同时刷新外层 SHA，以验证别名证明本身，而非仅检测文件哈希变化。"""
+        path = self.root / self.cases[case_number]["index_path"]
+        self.write(path, index)
+        manifest_path = path.parent / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["index_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.write(manifest_path, manifest)
+
+    def test_merged_cell_aliases_pass_three_case_roles_without_duplicate_tag_units(self):
+        for number in range(3):
+            index = self.use_merged_case(number)
+            self.assertEqual(index["merged_cell_alias_policy"], "exact_merged_cell_v1")
+            self.assertEqual(len(index["units"]), 7)
+            self.assertEqual(index["tables"][0]["cell_unit_ids"][1][0],
+                             index["tables"][0]["cell_unit_ids"][0][0])
+        report = self.run_evaluation()
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["summary"]["fix_improvements"], 1)
+        self.assertTrue(all(case["candidate_validation"]["ok"] for case in report["cases"]))
+
+    def test_merged_alias_does_not_move_endpoint_or_absorb_other_device(self):
+        self.use_merged_case(0)
+        self.candidate_output(0, [record(end="<C90>")])
+        report = self.run_evaluation()
+        errors = report["cases"][0]["assertions"][0]["candidate"]["errors"]
+        self.assertEqual(errors[0]["code"], "REQUIRED_TAG_MISSING")
+        self.assertIn("<C3>", errors[0]["tags"])
+        self.candidate_output(0, [record(end="<C8>")])
+        report = self.run_evaluation()
+        errors = report["cases"][0]["assertions"][0]["candidate"]["errors"]
+        self.assertIn("FORBIDDEN_TAG_INCLUDED", {error["code"] for error in errors})
+        self.assertEqual(report["status"], "failed")
+
+    def test_reject_forged_missing_or_drifted_merged_alias_metadata(self):
+        original = self.use_merged_case(0)
+        for mutation in ("missing", "empty", "policy", "coordinate", "bool", "duplicate", "extra", "mapping"):
+            with self.subTest(mutation=mutation):
+                changed = copy.deepcopy(original)
+                if mutation == "missing":
+                    changed.pop("merged_cell_aliases")
+                    changed.pop("merged_cell_alias_policy")
+                elif mutation == "empty":
+                    changed["merged_cell_aliases"] = []
+                elif mutation == "policy":
+                    changed["merged_cell_alias_policy"] = "accept_all_repeated_tags"
+                elif mutation == "coordinate":
+                    changed["merged_cell_aliases"][0]["col"] = 1
+                elif mutation == "bool":
+                    changed["merged_cell_aliases"][0]["anchor_row"] = False
+                elif mutation == "duplicate":
+                    changed["merged_cell_aliases"].append(copy.deepcopy(changed["merged_cell_aliases"][0]))
+                elif mutation == "extra":
+                    changed["merged_cell_aliases"][0]["unverified"] = True
+                else:
+                    changed["tables"][0]["cell_unit_ids"][1][0] = changed["tables"][0]["cell_unit_ids"][1][1]
+                self.rewrite_prepared_index(changed)
+                with self.assertRaises(evaluation.EvaluationError):
+                    self.run_evaluation()
+                self.assertEqual(self.store.reports, [])
+
+    def test_reject_alias_claim_without_merge_evidence(self):
+        path = self.root / self.cases[0]["index_path"]
+        index = json.loads(path.read_text(encoding="utf-8"))
+        index["merged_cell_alias_policy"] = "exact_merged_cell_v1"
+        index["merged_cell_aliases"] = [{"block_index": 0, "row": 1, "col": 0,
+                                        "anchor_row": 0, "anchor_col": 0, "merge_index": 0}]
+        self.rewrite_prepared_index(index)
+        with self.assertRaises(evaluation.EvaluationError):
+            self.run_evaluation()
+        self.assertEqual(self.store.reports, [])
+
+    def test_merged_alias_cannot_hide_an_unrelated_tag_unit(self):
+        index = self.use_merged_case(0)
+        index["units"] = [unit for unit in index["units"] if unit["tag"] != "<C8>"]
+        index["tag_to_unit"].pop("<C8>")
+        for number, unit in enumerate(index["units"]):
+            unit["order"] = number
+        self.rewrite_prepared_index(index)
+        with self.assertRaises(evaluation.EvaluationError):
+            self.run_evaluation()
+        self.assertEqual(self.store.reports, [])
+
     def test_passes_key_parameter_assertions_with_legal_redundancy(self):
         report = self.run_evaluation()
         self.assertEqual(report["status"], "passed")
@@ -467,6 +570,8 @@ class MemoryEvaluationTests(unittest.TestCase):
         import memory_learning
         import memory_store
 
+        for number in range(3):
+            self.use_merged_case(number)
         case = self.cases[0]
         case["role"] = "success"
         self.write(self.root / case["baseline_result_path"], [record()])

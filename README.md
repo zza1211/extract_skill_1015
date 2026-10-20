@@ -1,8 +1,8 @@
 # 条款抽取 Skill POC
 
-**0.7.0：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆与标书结果校验，不发起模型调用。暂不引入向量模型。
+**0.7.0：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、自检，并在提交前安排受限 `term-auditor` 独立核验；最终修订与提交仍由主代理负责。它也负责总结经验、组织经验的独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆与标书结果校验，不发起模型调用。暂不引入向量模型。
 
-先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；按标书检查条款、修改边界、同步文件和反馈学习见[结果校验说明](docs/result-review.md)。评测集准备、原生验证流程及前端清单框见[评测指南](docs/evaluation-guide.md)，网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
+先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；提交前的主/子代理职责、冻结与处置见[独立内容核验](.opencode/skills/term-extract/references/independent-audit.md)。按标书检查条款、修改边界、同步文件和反馈学习见[结果校验说明](docs/result-review.md)。评测集准备、原生验证流程及前端清单框见[评测指南](docs/evaluation-guide.md)，网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
 
 ## 启动
 
@@ -36,7 +36,7 @@ opencode --agent term-extractor
 
 ```text
 请使用 term-extract 技能抽取 D:\私有数据\input.json。
-自主读取、核验边界和数量、校验并提交，记录有依据的观察或无新经验原因。
+自主读取、自检边界和数量，完成提交前独立核验、逐项处置并提交，记录有依据的观察或无新经验原因。
 ```
 
 标签学习示例：
@@ -57,13 +57,13 @@ opencode --agent term-extractor
 ```text
 继续本次抽取，沿用现有 index 和工作目录，不要重新 prepare。
 先立即调用 term_result_checkpoint 保存暂定候选；归属、边界和数量未确定的写成疑点。
-然后围绕疑点补读核验、validate 和 commit，报告最终结果路径及 run_id。
+然后围绕疑点补读核验、validate，完成独立核验与逐项处置后 commit，报告最终结果路径及 run_id。
 ```
 
 也可使用原生 CLI 恢复原会话：
 
 ```powershell
-opencode run --session 'ses_你的会话ID' --agent term-extractor --variant low '继续本次抽取，沿用现有 index，先保存暂定候选和疑点，再核验、校验并提交。'
+opencode run --session 'ses_你的会话ID' --agent term-extractor --variant low '继续本次抽取，沿用现有 index，先保存暂定候选和疑点，再自检、校验，完成独立核验和逐项处置后提交。'
 ```
 
 恢复原会话可沿用已交付原文及回执；如果另开会话，必须重新实际读取全文，不能把旧会话回执当成本次已读取。恢复指引不是后台重试器，生成上限、上下文不足或工具错误仍需如实处理。
@@ -90,7 +90,22 @@ python -X utf8 .opencode/skills/term-extract/scripts/memory_ui.py
 
 最终为七字段 JSON 数组：`id`、`条款标题`、`条款分类`、`相关条款`、`产品分类`、`定位标识`、`产品数量`。产品分类仅参考；质量重点是目标设备齐全、选型参数完整、不混入其他设备参数、数量和关系正确。机柜与布线不抽取，纯品牌准入不单独抽为 general；连续表格两行不因此成为 separate。完整口径见 [business-rules.md](.opencode/skills/term-extract/references/business-rules.md)。
 
-`prepare / read / checkpoint / search / validate / commit` 是正常自主抽取工具链。正式提交附简体中文复盘：最多三条有证据的可迁移观察，或没有新经验的原因。演示 `demo_tags` 仅工作副本可用，不能用于生产提交或可信学习。仓库不提供真实标书、标签、私有库或运行报告。
+`prepare / read / checkpoint / search / validate` 形成主代理草稿；提交前由审计专用工具完成下面的独立核验与处置，再 `commit`。正式提交附简体中文复盘：最多三条有证据的可迁移观察，或没有新经验的原因。演示 `demo_tags` 仅工作副本可用，不能用于生产提交或可信学习。仓库不提供真实标书、标签、私有库或运行报告。
+
+## 提交前怎样独立核验
+
+用户仍只向 `term-extractor` 提供输入。主代理阅读全文、自检并 validate 后，调用 `term_audit_prepare` 冻结索引、草稿与证据的副本，用原生 task 新建 `term-auditor` 子会话，prompt 严格只有 `audit_id=票号`。子代理只看冻结的七字段草稿，不接收主代理证据 notes、推理、正确标签或历史答案，只使用本票工具。报告期间主工作稿可变化，子会话仍看本票原稿。
+
+```text
+主代理阅读全文、自检、validate → prepare 冻结草稿
+  → 新审计子会话独立阅读全文 → 固定采购对象清单 → 查看冻结草稿
+  → 报告漏对象／必要参数遗漏／污染／错误关联
+  → 主代理分页 inspect、回读原文、修订 validate、逐项 resolve → commit
+```
+
+先形成独立对象清单再看草稿，用于减轻只围着既有结果检查而继续漏掉对象的问题；它不是完整召回保证。子代理不修改结果或归纳经验，无真实发现时报告空数组。主代理回读报告涉及的原文，对所有发现逐条记录已修正、有依据地不采纳或未决；未决阻断提交并保留草稿。首次关闭可接受为真实 fixed 发现修改的结果，并记录 `final_draft_independently_reviewed=false`；无发现或全 dismissed 时，若结果已变化则必须新票。已经 cleared 后，结果或 sidecar 任一哈希再变都必须新票、新子会话，不能旧 resolve 重绑。finish 后主代理修改的版本，不能称为已被子代理再次看过。
+
+真实 OpenCode 主代理提交强制执行此门槛。`term-trial` 保持原 A/B 盲抽协议，不增加审计；没有 `execution_context` 的历史 Python CLI 保持兼容，不能用它绕过主代理流程。此阶段不改变七字段接口、业务范围、数量定义、标签学习顺序或网页人工校验。它增加一次独立全文读取与模型调用，不等于人工 gold，不承诺省 token 或找尽漏抽；预算不足或问题无法解决时保留草稿并明确未完成，不无限重开审计。工具、发现与处置格式见[完整协议](.opencode/skills/term-extract/references/independent-audit.md)。
 
 ## 经验如何学习、验证和消费
 
@@ -118,15 +133,15 @@ python -X utf8 .opencode/skills/term-extract/scripts/memory_ui.py
 | 位置 | 内容 |
 |---|---|
 | `.opencode/skills/term-extract/` | 中文 Skill、规则与原子脚本 |
-| `.opencode/agents/` | 唯一主代理与限定试验子代理 |
-| `.opencode/tools/` | 文档、提交、记忆、标签学习与试验工具 |
+| `.opencode/agents/` | 唯一主代理、提交前核验子代理与限定试验子代理 |
+| `.opencode/tools/` | 文档、提交、独立核验、记忆、标签学习与试验工具 |
 | `web/memory/` | 本地记忆管理页面 |
 | `runs/` | 自主抽取索引、回执、草稿和结果 |
 | `.term-memory/` | 版本库、可信案例、来源与独立试验工件 |
 
 默认私有数据被 Git 忽略。外置用 `TERM_EXTRACT_MEMORY_DIR`，OpenCode 与网页须一致；自定义仓库内目录需另加入忽略。
 
-模型调用和资源由 OpenCode 会话管理，没有旧网页运行器预算配置。三个案例的 A/B 至少六个子会话，不含首次主代理盲抽，还需主代理比较与复盘；应按可接受成本限制验证规模。长文本仍受所选模型窗口约束，关闭会话压缩不会扩大窗口。实际用量缺失不能按零费用计算。
+模型调用和资源由 OpenCode 会话管理，没有旧网页运行器预算配置。正常抽取额外包含提交前核验子会话的全文读取、检查及主代理处置；应计入总成本，不把隔离读取当作节省。三个案例的 A/B 至少六个试验子会话，不含首次主代理盲抽与其提交前核验，还需主代理比较与复盘；应按可接受成本限制验证规模。长文本仍受所选模型窗口约束，关闭会话压缩不会扩大窗口。实际用量缺失不能按零费用计算。
 
 旧反馈、人工来源确认、离线断言、评测后手动发布与撤回继续兼容；旧断言不生成模型输出，不能代替 agent 自动晋级的独立试验门槛。人工直发使用独立审核记录，不借用旧评测报告。详见[经验维护说明](.opencode/skills/term-extract/references/experience.md)。
 

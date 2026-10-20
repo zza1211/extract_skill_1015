@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import * as documents from "../.opencode/tools/term_document.ts";
 import * as results from "../.opencode/tools/term_result.ts";
 import * as learning from "../.opencode/tools/term_learning.ts";
+import { closeSyntheticAudit } from "./audit_fixture.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const directory = await mkdtemp(path.join(os.tmpdir(), "term-merged-cells-tools-"));
@@ -89,6 +90,7 @@ for (const unit of index.units) assert.equal(chunks.get(unit.unit_id)?.text, uni
 await invoke(results.checkpoint, { index_path: prepared.index_path, candidates_json: JSON.stringify(clauses) });
 const search = await invoke(documents.search, { index_path: prepared.index_path, query: "设备安装说明" });
 assert.equal(search.match_count_total, 1, "合并副本不增加搜索命中数量");
+await closeSyntheticAudit({ index_path: prepared.index_path, result_path: validated.result_path, evidence_path: validated.evidence_path }, context);
 const committed = await invoke(results.commit, commitArgs);
 assert.equal(committed.committed, true, JSON.stringify(committed));
 assert.equal(committed.learning.status, "no_experience");

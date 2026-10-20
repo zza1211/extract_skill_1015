@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import * as documents from "../.opencode/tools/term_document.ts";
+import { closeSyntheticAudit } from "./audit_fixture.mjs";
 import * as results from "../.opencode/tools/term_result.ts";
 import * as reviews from "../.opencode/tools/term_review.ts";
 
@@ -29,6 +30,7 @@ const predicted = [{ id: 0, 条款标题: "Access Point", 条款分类: "normal"
 const evidence = { clauses: [{ id: 0, quantity_source_tags: ["<C3>"], related_source_tags: [], notes: "Synthetic incorrect quantity for protocol testing." }], unresolved: [] };
 const checked = await invoke(results.validate, { index_path: prepared.index_path, result_json: JSON.stringify(predicted), evidence_json: JSON.stringify(evidence) });
 assert.equal(checked.ok, true);
+await closeSyntheticAudit({ index_path: prepared.index_path, result_path: checked.result_path, evidence_path: checked.evidence_path }, context);
 const committed = await invoke(results.commit, { index_path: prepared.index_path, result_path: checked.result_path, evidence_path: checked.evidence_path,
   reflection_json: JSON.stringify(noInsight), model_id: "synthetic-review-protocol-test" });
 assert.equal(committed.committed, true);

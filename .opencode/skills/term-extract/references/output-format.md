@@ -57,6 +57,10 @@ separate 数量填“未提及”、关联 normal/separate 已有具体数量时
 
 ## 校验与 demo
 
+结构校验只检查结果与 sidecar 的格式、标签和关联等约束，不代表提交前独立内容核验已经完成。正常 OpenCode 主代理在 validate 后须按 [独立内容核验](independent-audit.md) 冻结草稿副本并调用新 term-auditor 子会话。子会话先独立阅读全文、固定对象清单，再查看七字段草稿，不读取主 sidecar notes；报告期间主工作稿可变化，但不改变子会话所见。主代理读取其发现、回读原文并逐项处置，最终结果和 sidecar 与处置记录的哈希一致，且无 unresolved，才可 commit。核验报告单独保存，不在七字段结果或 sidecar 中额外增加审计字段。
+
+首次关闭时，主代理可为真实 fixed 发现修改结果，再 validate/resolve，记录 final_draft_independently_reviewed=false；无发现或全 dismissed 时若结果变更，须新票。已经 cleared 后，结果或 sidecar 任一文件哈希再变，必须新票、新子会话，不能重新 resolve 旧报告。未知问题保留为未决草稿，不能自动省略审计。报告无问题不等于人工验收；修改后的结果也不能称为已被审计者再次独立核验。term-trial 的独立 A/B 抽取、以及没有 execution_context 的历史 Python CLI 保持原协议，不通过这些兼容入口规避 OpenCode 主代理门槛。
+
 ```text
 python .opencode/skills/term-extract/scripts/validate_result.py --index work/index.json --result work/result.json --evidence work/evidence.json --report work/validation.json
 ```

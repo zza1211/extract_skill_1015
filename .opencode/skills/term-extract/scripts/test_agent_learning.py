@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 import agent_learning as agent
+import agent_audit as audit
 import commit_result
 import document_io
 import evolution_store as evolution
@@ -51,7 +52,7 @@ class AgentLearningTests(unittest.TestCase):
         return agent.begin_study(self.root, **({"input_path": self.input, "labels_path": self.labels_path, "family_id": "family-A",
             "index_path": self.index_path, "execution_context": self.context} | changes))
 
-    def commit(self, result=None, context=None, receipt_context=None):
+    def commit(self, result=None, context=None, receipt_context=None, expected_code=0):
         result = result if result is not None else self.labels
         context = context if context is not None else self.context
         receipts = {"index_sha256": store._file_hash(self.index_path), "coverage_kind": "full_original",
@@ -63,6 +64,10 @@ class AgentLearningTests(unittest.TestCase):
         receipt_path.write_text(json.dumps(receipts) + "\n", encoding="utf-8")
         result_path = self.write("draft/result.json", result)
         evidence_path = self.write("draft/evidence.json", {"clauses": [{"id": 0, "quantity_source_tags": ["<C2>"], "related_source_tags": [], "notes": "合成协议测试数量来源"}], "unresolved": []})
+        if context and context.get("agent") == "term-extractor":
+            # 本类测试标签隔离与学习协议；以合成空发现报告准备新的提交前置工件。
+            # 不改变待测预测，也不把核验意见当作标签正确性依据。
+            self.close_synthetic_audit(context, result_path, evidence_path)
         argv = ["commit_result.py", "--project-root", str(self.root), "--index", str(self.index_path), "--result", str(result_path),
                 "--evidence", str(evidence_path), "--receipts", str(receipt_path), "--out-dir", str(self.root / "final"), "--model-id", "synthetic-protocol-fixture"]
         if context is not False:
@@ -70,9 +75,35 @@ class AgentLearningTests(unittest.TestCase):
         output = io.StringIO()
         with patch("sys.argv", argv), redirect_stdout(output):
             code = commit_result.main()
-        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(code, expected_code, output.getvalue())
         response = json.loads(output.getvalue())
+        if expected_code:
+            return response
         return response["learning"]["run_id"]
+
+    def close_synthetic_audit(self, context, result_path, evidence_path):
+        def call(action, caller, **body):
+            return audit.dispatch(self.root, {"action": action, "execution_context": caller, **body})
+        prepared = call("prepare", context, index_path=str(self.index_path), result_path=str(result_path), evidence_path=str(evidence_path))
+        audit_id = prepared["audit_id"]
+        child = {"session_id": "synthetic_auditor_" + audit_id, "message_id": "synthetic_audit_message", "agent": "term-auditor"}
+        call("open", child, audit_id=audit_id)
+        cursor = "0"
+        while True:
+            page = call("read", child, audit_id=audit_id, cursor=cursor)["model_view"]
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+        call("inventory", child, audit_id=audit_id, objects=[])
+        cursor = "0"
+        while True:
+            page = call("draft", child, audit_id=audit_id, cursor=cursor)
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+        call("finish", child, audit_id=audit_id, findings=[], summary="合成学习协议 fixture，不模拟模型语义准确率。")
+        call("inspect", context, audit_id=audit_id)
+        call("resolve", context, audit_id=audit_id, result_path=str(result_path), evidence_path=str(evidence_path), decisions=[])
 
     def compared(self, result=None):
         study = self.begin()
@@ -148,6 +179,11 @@ class AgentLearningTests(unittest.TestCase):
         for kwargs in ({"context": self.context | {"session_id": "other"}}, {"receipt_context": self.context | {"session_id": "other"}},
                        {"receipt_context": self.context | {"agent": "term-trial"}}, {"receipt_context": False}, {"context": False, "receipt_context": self.context}):
             with self.subTest(kwargs=kwargs):
+                if "receipt_context" in kwargs and kwargs.get("context") is not False:
+                    rejected = self.commit(**kwargs, expected_code=2)
+                    self.assertFalse(rejected["committed"])
+                    self.assertFalse(rejected["coverage"]["complete"])
+                    continue
                 run_id = self.commit(**kwargs)
                 with self.assertRaises(store.MemoryError):
                     agent.compare_study(self.root, study["study_id"], run_id, self.context)

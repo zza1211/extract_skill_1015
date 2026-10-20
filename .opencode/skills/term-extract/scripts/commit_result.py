@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 from memory_store import run_memory_record
 from memory_learning import register_run, record_reflection, validate_reflection
@@ -16,7 +17,7 @@ def load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def coverage_report(index_path: Path, receipts_path: Path) -> dict:
+def coverage_report(index_path: Path, receipts_path: Path, execution_context: dict | None = None) -> dict:
     index = load_json(index_path)
     from document_io import validate_merged_aliases
     validate_merged_aliases(index)
@@ -36,6 +37,11 @@ def coverage_report(index_path: Path, receipts_path: Path) -> dict:
         if not line.strip():
             continue
         item = json.loads(line)
+        if execution_context:
+            actual = item.get("execution_context", {})
+            if (actual.get("session_id") != execution_context["session_id"]
+                    or actual.get("agent") != execution_context["agent"]):
+                continue
         receipt_count += 1
         if item.get("index_sha256") != fingerprint:
             invalid.append(f"第 {line_number} 条读取回执与当前 index 版本不一致")
@@ -96,8 +102,18 @@ def main() -> int:
     parser.add_argument("--allow-demo", action="store_true", help="只保存明确标注为演示的结果")
     args = parser.parse_args()
     try:
+        context = None
+        if args.execution_context_json:
+            context = json.loads(args.execution_context_json)
+            if not isinstance(context, dict) or set(context) != {"session_id", "message_id", "agent"} or any(not isinstance(v, str) or not v.strip() for v in context.values()):
+                raise ValueError("执行上下文必须包含真实 session_id/message_id/agent。")
+            if context["agent"] not in {"term-extractor", "term-trial"}:
+                raise ValueError("只有主抽取 agent 或限定盲抽试验可以提交结果；核验者不能提交。")
+            if (context["agent"] == "term-trial") != args.trial_only:
+                raise ValueError("试验会话必须使用 trial-only，不能伪装生产提交或跳过学习。")
         index_path = Path(args.index).resolve()
-        index = load_json(index_path)
+        index_bytes = index_path.read_bytes()
+        index = json.loads(index_bytes.decode("utf-8-sig"))
         reflection = None
         if args.reflection_json is not None or args.reflection_file is not None:
             from memory_store import _parse, _read_json
@@ -105,17 +121,30 @@ def main() -> int:
             reflection = validate_reflection(raw_reflection, index)
         if args.trial_only and (reflection is None or reflection["insights"]):
             raise ValueError("独立试验必须提交空经验复盘，不能产生学习来源或候选。")
-        result = load_json(Path(args.result))
-        evidence = load_json(Path(args.evidence))
+        result_bytes = Path(args.result).read_bytes()
+        evidence_bytes = Path(args.evidence).read_bytes()
+        result = json.loads(result_bytes.decode("utf-8-sig"))
+        evidence = json.loads(evidence_bytes.decode("utf-8-sig"))
         validator = Path(__file__).with_name("validate_result.py")
-        argv = [sys.executable, "-X", "utf8", str(validator), "--index", str(index_path), "--result", args.result, "--evidence", args.evidence]
-        if args.allow_demo:
-            argv.append("--allow-demo")
-        validation_process = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8")
+        # 工作稿可被另一轮 validate 重写。校验和最终保存使用同一份捕获字节。
+        with tempfile.TemporaryDirectory(prefix="term-commit-snapshot-") as temporary:
+            frozen_result = Path(temporary) / "result.json"
+            frozen_evidence = Path(temporary) / "evidence.json"
+            frozen_index = Path(temporary) / "index.json"
+            frozen_result.write_bytes(result_bytes)
+            frozen_evidence.write_bytes(evidence_bytes)
+            frozen_index.write_bytes(index_bytes)
+            argv = [sys.executable, "-X", "utf8", str(validator), "--index", str(frozen_index), "--result", str(frozen_result), "--evidence", str(frozen_evidence)]
+            if args.allow_demo:
+                argv.append("--allow-demo")
+            validation_process = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8")
         if not validation_process.stdout.strip():
             raise ValueError(validation_process.stderr.strip() or "结果校验没有返回报告")
         validation = json.loads(validation_process.stdout)
-        coverage = coverage_report(index_path, Path(args.receipts))
+        validation["inputs"] = {"index": str(index_path), "result": args.result, "evidence": args.evidence}
+        validation["input_snapshot_sha256"] = {"index": hashlib.sha256(index_bytes).hexdigest(),
+            "result": hashlib.sha256(result_bytes).hexdigest(), "evidence": hashlib.sha256(evidence_bytes).hexdigest()}
+        coverage = coverage_report(index_path, Path(args.receipts), context)
         if not index_path.with_name("memory_snapshot.json").is_file():
             raise ValueError("缺少本任务经验快照，请重新注册文档；空经验库也需要固定空快照。")
         memory = run_memory_record(index_path)
@@ -124,10 +153,25 @@ def main() -> int:
             errors.append("草稿未通过结构或证据格式校验，请先修订")
         if not coverage["complete"]:
             errors.append("原文读取存在缺口或回执版本冲突，请补读后重新提交")
+        if coverage["index_sha256"] != hashlib.sha256(index_bytes).hexdigest():
+            errors.append("提交期间索引版本已变化，请重新检查原文。")
         if not isinstance(evidence, dict) or evidence.get("unresolved"):
             errors.append("仍有未解决事项，保留草稿并报告待处理问题")
+        audit = {"status": "trial_skipped" if args.trial_only else "legacy_cli_not_required"}
+        if context and context["agent"] == "term-extractor" and not errors:
+            from agent_audit import assert_ready
+            try:
+                audit = assert_ready(args.project_root, index_path, Path(args.result), Path(args.evidence), context)
+                if (hashlib.sha256(result_bytes).hexdigest() != audit["final_result_sha256"]
+                        or hashlib.sha256(evidence_bytes).hexdigest() != audit["final_evidence_sha256"]):
+                    raise ValueError("提交期间工作稿发生变化，捕获版本与核验关闭版本不一致；已保留草稿，请重新检查后提交。")
+                if hashlib.sha256(index_bytes).hexdigest() != audit["index_sha256"]:
+                    raise ValueError("提交期间索引发生变化，请重新准备核验。")
+            except ValueError as error:
+                errors.append(str(error))
+                audit = {"status": "required", "next_action": "保留草稿，完成 term_audit_prepare → 子 agent 核验 → inspect → 原文回读 → resolve。"}
         if errors:
-            print(json.dumps({"committed": False, "errors": errors, "coverage": coverage, "validation": validation}, ensure_ascii=False))
+            print(json.dumps({"committed": False, "errors": errors, "coverage": coverage, "validation": validation, "agent_audit": audit}, ensure_ascii=False))
             return 2
         directory = Path(args.out_dir).resolve()
         directory.mkdir(parents=True, exist_ok=True)
@@ -152,23 +196,21 @@ def main() -> int:
             "coverage": coverage,
             "validation": validation,
             "memory": memory,
-            "semantic_validation": "由主 agent 核验；程序没有验证选型参数完整性、漏产品或数量语义。",
+            "agent_audit": audit,
+            "semantic_validation": ("独立模型核验了冻结草稿，主 agent 回读并处置发现；程序不证明语义正确，主代理修订版未必经过再次独立核验。"
+                                    if audit["status"] == "cleared" else
+                                    "由主 agent 核验；程序没有验证选型参数完整性、漏产品或数量语义。"),
         }
-        if args.execution_context_json:
-            context = json.loads(args.execution_context_json)
-            if not isinstance(context, dict) or set(context) != {"session_id", "message_id", "agent"} or any(not isinstance(v, str) or not v.strip() for v in context.values()):
-                raise ValueError("执行上下文必须包含真实 session_id/message_id/agent。")
+        if context:
             record["execution_context"] = context
         if args.trial_only:
             if record.get("execution_context", {}).get("agent") != "term-trial":
                 raise ValueError("试验提交必须来自 term-trial 的真实工具执行上下文。")
             record["trial_only"] = True
-        result_text = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
-        evidence_text = json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"
-        record["result_sha256"] = hashlib.sha256(result_text.encode("utf-8")).hexdigest()
-        record["evidence_sha256"] = hashlib.sha256(evidence_text.encode("utf-8")).hexdigest()
-        result_path.write_text(result_text, encoding="utf-8", newline="\n")
-        evidence_path.write_text(evidence_text, encoding="utf-8", newline="\n")
+        record["result_sha256"] = hashlib.sha256(result_bytes).hexdigest()
+        record["evidence_sha256"] = hashlib.sha256(evidence_bytes).hexdigest()
+        result_path.write_bytes(result_bytes)
+        evidence_path.write_bytes(evidence_bytes)
         record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
         learning = ({"status": "trial_skipped", "notice": "独立试验不登记学习来源，不产生经验。"} if args.trial_only else
                     {"status": "demo_skipped", "notice": "演示运行不进入经验库。"}
@@ -193,7 +235,7 @@ def main() -> int:
         record["learning"] = learning
         record["result_review"] = review
         record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-        print(json.dumps({"committed": True, "status": record["status"], "result_path": str(result_path), "evidence_path": str(evidence_path), "run_path": str(record_path), "production_submittable": not demo, "semantic_validation": record["semantic_validation"], "learning": learning, "result_review": review,
+        print(json.dumps({"committed": True, "status": record["status"], "result_path": str(result_path), "evidence_path": str(evidence_path), "run_path": str(record_path), "production_submittable": not demo, "semantic_validation": record["semantic_validation"], "agent_audit": audit, "learning": learning, "result_review": review,
                           "next_action": "请提示用户到网页的条款校验页核对本篇结果，并主动完成整篇校验。用户反馈校验完成后，使用 term_review 工具读取已校验修订、总结候选经验。" if review.get("status") != "not_applicable" else "按本次运行状态报告结果。"}, ensure_ascii=False))
         return 0
     except (OSError, ValueError, TypeError, KeyError) as error:

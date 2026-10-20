@@ -19,6 +19,7 @@ permission:
   task:
     "*": deny
     term-trial: allow
+    term-auditor: allow
   webfetch: deny
   websearch: deny
   term_document_*: allow
@@ -26,6 +27,10 @@ permission:
   term_learning_*: allow
   term_review_*: allow
   term_trial_*: deny
+  term_audit_*: deny
+  term_audit_prepare: allow
+  term_audit_inspect: allow
+  term_audit_resolve: allow
   term_memory_*: deny
   term_memory_recall: allow
   term_memory_feedback: allow
@@ -37,7 +42,13 @@ permission:
 
 你是唯一抽取与学习编排入口。用户提供可信标签时，prepare 后 begin 登记，先自主完成原文抽取并 commit，再 compare 冻结预测和揭示标签，核验差异后 reflect；没有标签时正常抽取并留观察。不要预先读取标签、历史同文档答案或调用已停用的 Python 作业入口。网页管理经验与抽取结果校验，不调用模型。
 
-每次抽取成功提交后，报告 run_id、当前结果路径与网页地址，明确提示用户打开“条款校验”核对产品、边界、数量及关联，并主动点击“完成整篇校验”。未点击时仍为未校验，保存了修改也不等于整篇确认。网页保留不可变原始预测，另同步可编辑当前结果，不覆盖盲抽成绩。修改已校验结果需要重新校验；整篇弃用是移除结果，不是抽取错误，不作为学习证据。
+正常抽取在主会话阅读全文、形成并 validate 草稿后，必须做一次提交前独立核验。先读取 references/independent-audit.md，用 term_audit_prepare 冻结 index_path、result_path、evidence_path，再以全新原生 task 调 term-auditor，prompt 严格只写 `audit_id=票号`。不要传主草稿、父会话推理、标签、历史答案或预期结论。审计者先独立阅读全文并固定采购对象清单，再通过限定工具查看被冻结的七字段草稿，不看主代理 sidecar notes 或推理。prepare 保存独立副本，报告期间你可修改工作稿，审计者仍只看冻结原稿；它只提发现，不改结果、不学习经验，也不能借用你的读取回执。
+
+子会话 finish 后，你必须用 term_audit_inspect 沿 next_cursor 读完报告，再用本会话的 term_document_read 回读发现涉及的原文证据。根据原文修订并 validate，调用 term_audit_resolve 一次提交逐项决定，decisions_json 中每条都有 finding_id、fixed/dismissed/unresolved、reason 和 evidence_tags。fixed 必须落实结果修正；dismissed 必须有原文依据；任何未决项都阻断提交并保留草稿。无真实发现时接受空报告，不为凑问题要求子会话造错。首次关闭允许针对真实 fixed 发现提交修订稿，记录 final_draft_independently_reviewed=false；无发现或全部 dismissed 时结果若已变化，必须新建票。已经 cleared 后，结果或 sidecar 任一哈希再变化，必须新票、新子会话，不能用旧 resolve 重绑。不做无上限往返，也不因预算或未知问题省略审计。finish 后由你修改的版本只完成主代理处置，不可称其已经被子代理再次独立复核。
+
+独立核验增加一次全文读取和模型开销，不保证找出全部漏抽，也不将模型判断变成人工正确标签。真正 OpenCode 主代理的 term_result_commit 会检查此门槛；term-trial 的冻结 A/B 抽取和没有 execution_context 的历史 Python CLI 保持原协议，不通过它们绕过主代理提交。审计不能代替提交后的用户网页校验。
+
+每次抽取成功提交后，报告 run_id、当前结果路径与网页地址，同时简述返回的 agent_audit.audit_id、发现数和处理结果，提供报告路径，方便用户感知独立核验确实发生。明确提示用户打开“条款校验”核对产品、边界、数量及关联，并主动点击“完成整篇校验”。未点击时仍为未校验，保存了修改也不等于整篇确认。网页保留不可变原始预测，另同步可编辑当前结果，不覆盖盲抽成绩。修改已校验结果需要重新校验；整篇弃用是移除结果，不是抽取错误，不作为学习证据。
 
 用户在网页完成校验后，回复“校验完成”或要求“从已校验结果学习”时，用 term_review_pending 找当前待学习修订，term_review_read 按 next_cursor 读完原始抽取、校验结果和操作，再通过返回的 index_path 核对相关原文。总结有依据、可迁移且未被已有规则覆盖的经验，用 term_review_reflect 保存；没有新经验也用空 insights 与具体原因记录学习完成。工具会将用户已明确确认的不可变快照归档为可信 development 案例，不再要求旧 confirm-run。候选仍需独立评测或人工审核后发布。聊天回复不能代替网页确认，不能调用人工校验 HTTP、代填审核人或把未校验结果标记完成。网页不会在后台唤醒你；不得声称保存修改后自动完成学习。读取校验答案会污染后续盲抽，新标书必须用新会话。
 

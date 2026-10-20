@@ -12,6 +12,7 @@ import * as results from "../.opencode/tools/term_result.ts";
 import * as learning from "../.opencode/tools/term_learning.ts";
 import * as trials from "../.opencode/tools/term_trial.ts";
 import * as experiments from "../.opencode/tools/term_learning_trial.ts";
+import { closeSyntheticAudit } from "./audit_fixture.mjs";
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
 const directory=await mkdtemp(path.join(os.tmpdir(),"term-agent-tools-"));
@@ -42,6 +43,7 @@ assert.equal(status.labels_json,undefined);assert.equal(status.labels_path,undef
 await invoke(documents.read,{index_path:prepared.index_path});
 await invoke(results.checkpoint,{index_path:prepared.index_path,candidates_json:JSON.stringify([{条款标题:"Access Point",疑点:[]}])});
 const draft=await invoke(results.validate,{index_path:prepared.index_path,result_json:JSON.stringify(clause("2 units")),evidence_json:JSON.stringify(evidence)});
+await closeSyntheticAudit({index_path:prepared.index_path,result_path:draft.result_path,evidence_path:draft.evidence_path},context);
 const committed=await invoke(results.commit,{index_path:prepared.index_path,result_path:draft.result_path,evidence_path:draft.evidence_path,reflection_json:JSON.stringify(reflection),model_id:"synthetic-protocol"});
 assert.equal(committed.committed,true);
 const compared=await invoke(learning.compare,{study_id:study.study_id,run_id:committed.learning.run_id});

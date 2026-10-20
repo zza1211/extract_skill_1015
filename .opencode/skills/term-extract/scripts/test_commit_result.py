@@ -45,6 +45,19 @@ class CoverageTests(unittest.TestCase):
         self.record([(0, 10)], "old-index")
         self.assertFalse(coverage_report(self.index, self.receipts)["complete"])
 
+    def test_real_session_cannot_borrow_other_session_or_role_coverage(self):
+        self.record([(0, 10)])
+        receipt = json.loads(self.receipts.read_text())
+        parent = {"session_id": "new-parent", "message_id": "new-read", "agent": "term-extractor"}
+        for actual in ({"session_id": "old-parent", "agent": "term-extractor"},
+                       {"session_id": "new-parent", "agent": "term-auditor"}, {}):
+            receipt["execution_context"] = actual
+            self.receipts.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+            self.assertFalse(coverage_report(self.index, self.receipts, parent)["complete"])
+        receipt["execution_context"] = parent
+        self.receipts.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+        self.assertTrue(coverage_report(self.index, self.receipts, parent)["complete"])
+
 
 class CommitLearningTests(unittest.TestCase):
     def setUp(self):
@@ -73,16 +86,86 @@ class CommitLearningTests(unittest.TestCase):
         self.receipts.write_text(json.dumps(receipts) + "\n", encoding="utf-8")
         self.output = self.root / "final"
 
-    def invoke(self, reflection=None):
+    def invoke(self, reflection=None, context=None):
         argv = ["commit_result.py", "--project-root", str(self.root), "--index", str(self.index_path),
             "--result", str(self.result), "--evidence", str(self.evidence), "--receipts", str(self.receipts),
             "--out-dir", str(self.output), "--model-id", "synthetic-commit-test"]
         if reflection is not None:
             argv.extend(["--reflection-json", json.dumps(reflection)])
+        if context is not None:
+            argv.extend(["--execution-context-json", json.dumps(context)])
         captured = io.StringIO()
         with patch("sys.argv", argv), redirect_stdout(captured):
             code = commit_result.main()
         return code, json.loads(captured.getvalue())
+
+    def close_audit(self):
+        import agent_audit
+        parent = {"session_id": "commit-parent", "message_id": "parent-tool", "agent": "term-extractor"}
+        child = {"session_id": "commit-child", "message_id": "child-tool", "agent": "term-auditor"}
+        def call(action, context, **body):
+            return agent_audit.dispatch(self.root, {"action": action, "execution_context": context, **body})
+        prepared = call("prepare", parent, index_path=str(self.index_path), result_path=str(self.result), evidence_path=str(self.evidence))
+        audit_id = prepared["audit_id"]
+        call("open", child, audit_id=audit_id)
+        cursor = "0"
+        while True:
+            page = call("read", child, audit_id=audit_id, cursor=cursor)["model_view"]
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+        call("inventory", child, audit_id=audit_id, objects=[{"title": "Access Point", "evidence_tags": ["<C1>"]}])
+        call("draft", child, audit_id=audit_id)
+        call("finish", child, audit_id=audit_id, findings=[], summary="提交一致性的合成协议测试，不宣称模型正确。")
+        call("inspect", parent, audit_id=audit_id)
+        call("resolve", parent, audit_id=audit_id, result_path=str(self.result), evidence_path=str(self.evidence), decisions=[])
+        receipt = json.loads(self.receipts.read_text(encoding="utf-8"))
+        receipt["execution_context"] = parent
+        self.receipts.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+        return parent
+
+    def test_real_commit_preserves_exact_audited_bytes_and_hashes(self):
+        parent = self.close_audit()
+        original = self.result.read_bytes()
+        code, response = self.invoke(context=parent)
+        self.assertEqual(code, 0, response)
+        self.assertEqual(Path(response["result_path"]).read_bytes(), original)
+        run = json.loads(Path(response["run_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(run["result_sha256"], run["agent_audit"]["final_result_sha256"])
+        self.assertEqual(run["evidence_sha256"], run["agent_audit"]["final_evidence_sha256"])
+
+    def test_working_copy_race_cannot_save_a_different_version_than_audited(self):
+        parent = self.close_audit()
+        audited = self.result.read_bytes()
+        changed = json.loads(audited)
+        changed[0]["产品数量"] = "9"
+        self.result.write_text(json.dumps(changed, ensure_ascii=False), encoding="utf-8")
+        original_run = commit_result.subprocess.run
+        def concurrent_validate(*args, **kwargs):
+            # 提交捕获错版后，另一个 validate 将工作文件恢复到已关闭版。
+            self.result.write_bytes(audited)
+            return original_run(*args, **kwargs)
+        with patch.object(commit_result.subprocess, "run", side_effect=concurrent_validate):
+            code, response = self.invoke(context=parent)
+        self.assertEqual(code, 2)
+        self.assertFalse(response["committed"])
+        self.assertIn("版本不一致", " ".join(response["errors"]))
+        self.assertFalse((self.output / "result.json").exists())
+
+    def test_real_commit_cannot_borrow_an_earlier_parent_session_receipt(self):
+        parent = self.close_audit()
+        receipt = json.loads(self.receipts.read_text(encoding="utf-8"))
+        receipt["execution_context"]["session_id"] = "old-parent"
+        self.receipts.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+        code, response = self.invoke(context=parent)
+        self.assertEqual(code, 2)
+        self.assertFalse(response["committed"])
+        self.assertFalse(response["coverage"]["complete"])
+
+    def test_auditor_cannot_commit_final_result(self):
+        code, response = self.invoke(context={"session_id": "child", "message_id": "tool", "agent": "term-auditor"})
+        self.assertEqual(code, 2)
+        self.assertFalse(response["committed"])
 
     def test_legacy_cli_registers_pending_reflection_without_fabricating_experience(self):
         code, response = self.invoke()

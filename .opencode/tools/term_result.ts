@@ -53,7 +53,7 @@ export const validate = tool({
 });
 
 export const commit = tool({
-  description: "核对并保存最终结果，同时登记本次运行、保存主 agent 的简短复盘和未验证经验候选。无新经验可明确说明，不调用其他模型，不自动发布。",
+  description: "核对当前主会话全文读取、独立核验处置和最终草稿版本后提交结果，登记运行与简短复盘。未完成独立核验或仍有发现未处理时拒绝提交；不调用模型，不自动发布。",
   args: {
     index_path: tool.schema.string(),
     result_path: tool.schema.string().describe("term_result_validate 返回的草稿路径"),
@@ -71,6 +71,9 @@ export const commit = tool({
     const reflection = JSON.parse(args.reflection_json);
     const argv = ["--project-root", root, "--index", indexPath, "--result", resolveFile(root, args.result_path), "--evidence", resolveFile(root, args.evidence_path), "--receipts", path.join(path.dirname(indexPath), "read_receipts.jsonl"), "--out-dir", path.join(path.dirname(indexPath), "final"), "--model-id", args.model_id || "未记录"];
     const actualContext = executionContext(context);
+    if (!actualContext && (context.agent || context.sessionID || context.messageID)) {
+      throw new Error("提交需要完整的真实 OpenCode 执行上下文，不能缺少身份后退为历史 CLI 路径。");
+    }
     if (actualContext) argv.push("--execution-context-json", JSON.stringify(actualContext));
     if (context.agent === "term-trial") argv.push("--trial-only");
     if (args.allow_demo) argv.push("--allow-demo");

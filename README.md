@@ -68,6 +68,17 @@ opencode run --session 'ses_你的会话ID' --agent term-extractor --variant low
 
 恢复原会话可沿用已交付原文及回执；如果另开会话，必须重新实际读取全文，不能把旧会话回执当成本次已读取。恢复指引不是后台重试器，生成上限、上下文不足或工具错误仍需如实处理。
 
+## 评测前清理运行态
+
+如果要在空白记忆上评测新版本，可手动运行仓库外层脚本：
+
+```powershell
+python -X utf8 scripts/reset_eval_environment.py       # 只预览
+python -X utf8 scripts/reset_eval_environment.py --apply # 预览后输入 DELETE 才删除
+```
+
+脚本只清理 `runs/`、`.term-memory/` 和 `reports/`，不由 OpenCode 工具暴露，也不会删除代码、`examples/`、测试、输入标书或标签源文件。它会删除已发布经验快照、候选、反馈、案例索引和历史运行，因此需要保留的可信标签应放在清理范围之外，清理后重新导入。若 `TERM_EXTRACT_MEMORY_DIR` 指向项目外的目录，脚本默认只提示；确认该目录也属于本次评测后，再加 `--allow-external-memory` 执行清理。
+
 ## 网页管理记忆与结果校验
 
 另开终端启动，无前端构建依赖：

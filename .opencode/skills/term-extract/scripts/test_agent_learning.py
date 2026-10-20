@@ -94,14 +94,20 @@ class AgentLearningTests(unittest.TestCase):
             if not page["has_more"]:
                 break
             cursor = page["next_cursor"]
-        call("inventory", child, audit_id=audit_id, objects=[])
+        # 固定合成映射只用于学习协议运输，不模拟独立设备识别或召回效果。
+        clauses = [item for item in store._read_json(result_path) if item["条款分类"] != "general"]
+        saved = call("inventory", child, audit_id=audit_id, objects=[
+            {"title": item["条款标题"], "object_kind": "equipment", "evidence_tags": list(dict.fromkeys(item["定位标识"]))}
+            for item in clauses])
         cursor = "0"
         while True:
             page = call("draft", child, audit_id=audit_id, cursor=cursor)
             if not page["has_more"]:
                 break
             cursor = page["next_cursor"]
-        call("finish", child, audit_id=audit_id, findings=[], summary="合成学习协议 fixture，不模拟模型语义准确率。")
+        coverage = [{"object_id": oid, "status": "covered", "clause_ids": [item["id"]], "finding_ids": [],
+                     "reason": "合成夹具固定映射，不是模型质量证据。"} for oid, item in zip(saved["object_ids"], clauses)]
+        call("finish", child, audit_id=audit_id, findings=[], coverage=coverage, summary="合成学习协议 fixture，不模拟模型语义准确率。")
         call("inspect", context, audit_id=audit_id)
         call("resolve", context, audit_id=audit_id, result_path=str(result_path), evidence_path=str(evidence_path), decisions=[])
 

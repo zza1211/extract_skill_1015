@@ -2,7 +2,7 @@
 name: term-extract
 description: 从带 Cxx 定位标签的标书 text/table JSON 中识别采购设备或系统，提取支持选型配置的技术条款范围、通用与分散关联及采购数量；由 OpenCode 主 agent 根据原文完成判断。
 metadata:
-  version: "0.7.0"
+  version: "0.8.0"
   language: "zh-CN"
 ---
 
@@ -22,7 +22,7 @@ metadata:
 
 没有标签时，按下文完成抽取与复盘；自检观察先留为候选。有用户提供的可信标签时，先读 [标签学习与独立验证](references/learning-modes.md)：prepare 后用 term_learning_begin 登记，再用同一套原文工具完成抽取和 commit，之后才能 compare 揭示标签。每篇标书使用新会话，不预读标签或同文档历史答案；自己整理的修正稿不能冒充用户标签。
 
-两类子任务不能混淆：正常抽取提交前，按 [独立内容核验](references/independent-audit.md) 调用 term-auditor，prompt 只含 `audit_id=票号`，用于检查本篇冻结草稿；经验独立验证只在有候选和可信验证案例时进行，由你挑选案例并准备试验票，再用 OpenCode 内置 task 调用 term-trial，prompt 只含 `trial_id=票号`。每票使用全新子会话，不传父会话历史、标签、预期答案或修复提示。审计者不改结果、不产生经验；试验者自主抽取并冻结结果，也不产生经验。日常抽取不按设备启动多个子 agent；term-trial 保持原 A/B 协议，不增加提交前审计。
+两类子任务不能混淆：正常抽取提交前，按 [独立内容核验](references/independent-audit.md) 调用 term-auditor，prompt 只含 `audit_id=票号`，用于检查本篇冻结草稿；经验独立验证只在有候选和可信验证案例时进行，由你挑选案例并准备试验票，再用 OpenCode 内置 task 调用 term-trial，prompt 只含 `trial_id=票号`。新票使用全新子会话，不传父会话历史、标签、预期答案或修复提示。核验中断先用 term_audit_status 查询并以原 task_id 恢复同票同一子会话；无法恢复才显式 abandon，重新准备新票，不继承旧覆盖。审计者不改结果、不产生经验；试验者自主抽取并冻结结果，也不产生经验。日常抽取不按设备启动多个子 agent；term-trial 保持原 A/B 协议，不增加提交前审计。
 
 用户询问评测集准备、评测路线或网页清单路径时，按需读取 [评测准备与示例](../../../docs/evaluation-guide.md)。推荐从原文与可信标签组织原生独立试验；网页离线 JSON 清单只检查已有预测与断言，不启动抽取模型。仓库中的合成示例用于理解和检查协议，不能用来替真实候选提供效果证据。
 
@@ -78,7 +78,9 @@ metadata:
 
 结构通过后，主代理仍要自检：目标产品是否漏抽；关键参数是否完整；是否混入其他设备参数；general/separate 是否关联正确；数量是否有原文依据。主代理自检围绕具体疑点补读，不为重复确认在本会话反复读整篇；下面的独立核验是另一个子会话按要求全文读取，不能省略或借用主回执。
 
-读取 [独立内容核验](references/independent-audit.md)，用 term_audit_prepare(index_path, result_path, evidence_path) 冻结当前草稿副本，以新 task 调 term-auditor，prompt 严格只写 `audit_id=票号`。子会话通过独立 read 回执读完原文、用 inventory 固定对象清单后才查看七字段草稿，不接收父会话 sidecar notes、推理或标签。主工作稿在报告期间可修改，子会话仍看冻结原稿。它按漏产品、关键参数遗漏、污染和关联检查并 finish；没有真实问题可提交空发现，不能造错。
+读取 [独立内容核验](references/independent-audit.md)，用 term_audit_prepare(index_path, result_path, evidence_path) 冻结当前草稿副本，以新 task 调 term-auditor，prompt 严格只写 `audit_id=票号`，保存返回的 task_id。子会话独立读完全文，按设备或有明确集成依据的整体系统固定清单后才看七字段草稿；不能用 Wi-Fi Network 等章节名代替各有选型要求的 AC/AP，也不强拆超融合系统或配件。新票 protocol_version=2，finish 时须对每个清点对象给 covered/missing/uncertain 映射及依据；映射齐全不证明语义正确。子会话不接收父 sidecar notes、推理或标签，主工作稿变化不改变本票冻结稿。它按漏产品、关键参数遗漏、污染和关联检查；无真实问题可提交空发现，但不能省略对象映射。
+
+中断后先用 term_audit_status 查询阶段和首个覆盖缺口；有 continue_task_id 时用原生 task 的 task_id 恢复该子会话，prompt 仍仅 audit_id。报告已完成则直接 inspect，不再派发。确实无法恢复时先 term_audit_abandon 记录原因，再验证当前稿并准备新票、新子会话重新独立读取；废弃不删除旧工件，也不等于审计完成。冻结材料漂移须停止旧票；已 cleared 的票不能废弃，应另准备新票。旧 v1 票沿用原协议，不补造设备映射。完整阶段、字段和恢复边界见独立核验参考。
 
 你用 term_audit_inspect 分页读完报告，通过本会话 term_document_read 回读发现涉及的证据，修正后重新 validate，再用 term_audit_resolve 一次提交全部 fixed/dismissed/unresolved、理由与 evidence_tags。fixed 要落实结果修正，dismissed 要有原文依据，未决阻断提交并保留草稿。首次关闭可接受真实 fixed 对应的修订稿，并记录 final_draft_independently_reviewed=false；无发现或全 dismissed 时若结果变更，必须新票。已经 cleared 后，最终结果或 sidecar 任一哈希变化都必须新票、新子会话，不能旧 resolve 重绑。禁止无上限往返，也不能因未知问题或预算不足省略核验；finish 后的主代理修改不代表新版本已被再次独立审查。独立核验增加全文读取与模型成本，不是正确标签、完整召回保证或节省 token 的承诺。
 

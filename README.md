@@ -98,12 +98,16 @@ python -X utf8 .opencode/skills/term-extract/scripts/memory_ui.py
 
 ```text
 主代理阅读全文、自检、validate → prepare 冻结草稿
-  → 新审计子会话独立阅读全文 → 固定采购对象清单 → 查看冻结草稿
-  → 报告漏对象／必要参数遗漏／污染／错误关联
+  → 新审计子会话独立阅读全文 → 按设备或有据的整体系统固定清单 → 查看冻结草稿
+  → 逐对象对应草稿，报告漏对象／必要参数遗漏／污染／错误关联
   → 主代理分页 inspect、回读原文、修订 validate、逐项 resolve → commit
 ```
 
-先形成独立对象清单再看草稿，用于减轻只围着既有结果检查而继续漏掉对象的问题；它不是完整召回保证。子代理不修改结果或归纳经验，无真实发现时报告空数组。主代理回读报告涉及的原文，对所有发现逐条记录已修正、有依据地不采纳或未决；未决阻断提交并保留草稿。首次关闭可接受为真实 fixed 发现修改的结果，并记录 `final_draft_independently_reviewed=false`；无发现或全 dismissed 时，若结果已变化则必须新票。已经 cleared 后，结果或 sidecar 任一哈希再变都必须新票、新子会话，不能旧 resolve 重绑。finish 后主代理修改的版本，不能称为已被子代理再次看过。
+新核验票为 `protocol_version=2`。清点以具有选型要求的设备或有集成依据的整体系统为单位，不能以 Wi-Fi Network 总项替代各有要求的 AC/AP，也不强拆超融合组成。看过草稿后，每个对象均须有 covered/missing/uncertain 对应及简短依据；缺失或不确定须关联有该对象证据的发现，covered 不能只指向 general。报告保存清单与对应，可用 `term_audit_inspect(section="coverage")` 分页查看。该记录检查不保证对象清点或匹配正确，旧票保持 v1，不重写历史。
+
+核验中断先用 `term_audit_status` 查看阶段与首个未覆盖游标，使用返回的 `continue_task_id` 恢复同票的原子会话。报告已完成时直接 inspect；原子会话确实无法恢复，才先 `term_audit_abandon` 留下原因，再 prepare 新票、新子会话重新全文核验。旧票失效且覆盖不转移，历史工件保留；已 cleared 的票不能废弃。status 不交付报告，也不能代替 inspect。
+
+子代理不修改结果或归纳经验，无真实发现时报告空数组，仍须交付全部对象对应。主代理回读报告涉及的原文，对所有发现逐条记录已修正、有依据地不采纳或未决；未决阻断提交并保留草稿。首次关闭可接受为真实 fixed 发现修改的结果，并记录 `final_draft_independently_reviewed=false`；无发现或全 dismissed 时，若结果已变化则必须新票。已经 cleared 后，结果或 sidecar 任一哈希再变都必须新票、新子会话，不能旧 resolve 重绑。finish 后主代理修改的版本，不能称为已被子代理再次看过。
 
 真实 OpenCode 主代理提交强制执行此门槛。`term-trial` 保持原 A/B 盲抽协议，不增加审计；没有 `execution_context` 的历史 Python CLI 保持兼容，不能用它绕过主代理流程。此阶段不改变七字段接口、业务范围、数量定义、标签学习顺序或网页人工校验。它增加一次独立全文读取与模型调用，不等于人工 gold，不承诺省 token 或找尽漏抽；预算不足或问题无法解决时保留草稿并明确未完成，不无限重开审计。工具、发现与处置格式见[完整协议](.opencode/skills/term-extract/references/independent-audit.md)。
 

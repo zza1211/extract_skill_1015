@@ -83,6 +83,10 @@ flowchart TD
 
 主代理以 `term_audit_prepare(index_path,result_path,evidence_path)` 保存草稿冻结副本，再使用新原生 task，prompt 严格只有 `audit_id=票号`。审计者只有 open/read/search/inventory/draft/finish 六个专用工具，先读完整原文、形成独立对象清单，才能分页看冻结的七字段草稿。它不接收主 sidecar notes、父会话完整推理、标签、历史答案或预期错误；读取回执独立，不能与主会话混用。主工作稿在报告期间可以变化，子会话仍只核对本票原稿。
 
+新票固定 `protocol_version=2`：按可选型设备或有明确依据的整体系统清点，避免用章节总名概括 AC/AP；真正整体采购的超融合系统不强拆。`finish` 还须逐对象保存 covered/missing/uncertain 对应与依据，漏对象或不确定项关联真实发现。报告包含独立清单和对应关系，`inspect(section="coverage")` 可分页查看；覆盖统计针对冻结草稿，不是主代理修订后成稿的复核成绩。旧票保持原协议。
+
+中断后主代理用 `term_audit_status` 只读阶段、原子会话与原文/草稿首个覆盖缺口，优先以返回的 `continue_task_id` 恢复同票。报告已完成则继续 inspect；无法恢复才显式 `term_audit_abandon` 记录原因，再为当前验证稿 prepare 新票、新子会话重新核验。废弃票保留工件但不能再使用，旧覆盖不转移；已 cleared 的票不能废弃。状态查询不交付答案，也不替代报告读取或人工校验。
+
 主代理用 `term_audit_inspect` 读完报告，在报告完成后用自己的 `term_document_read` 回读发现的证据，修订并 validate，再用 `term_audit_resolve` 一次提交全部 fixed/dismissed/unresolved、理由和标签。标记为已修正的发现要落实结果改稿，不采纳要有原文依据，任何未决都保留草稿并阻断提交；无真实问题可接受空报告。首次关闭允许为真实 fixed 发现接受修订稿，记录 `final_draft_independently_reviewed=false`；无发现或全 dismissed 时若结果变化，必须新票。已经 cleared 后，结果或 sidecar 任一哈希再变必须新票、新子会话，不能旧 resolve 重绑。finish 后的主代理修正不能称为再次独立复核；不做无上限往返，也不因未知问题自动省略审计。
 
 正常真实 OpenCode 主代理 commit 强制检查此门槛；没有 execution_context 的历史 Python CLI 保持兼容，不借此绕过主流程。独立核验增加全文读取与模型成本，不能当作正确标签、漏抽保证或节省 token 的证据。七字段、固定业务口径和用户网页校验保持不变。详细字段与阶段限制见[独立内容核验](../.opencode/skills/term-extract/references/independent-audit.md)。

@@ -17,6 +17,10 @@ import memory_store as store
 
 class AgentAuditTests(unittest.TestCase):
     def setUp(self):
+        # 保留历史 v1 票据的协议回归；新 prepare 的 v2 行为另有独立测试。
+        protocol = patch.object(audit, "PROTOCOL_VERSION", 1, create=True)
+        protocol.start()
+        self.addCleanup(protocol.stop)
         temporary = tempfile.TemporaryDirectory(prefix="term-agent-audit-test-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

@@ -16,7 +16,9 @@ from validate_result import validate_result
 
 MemoryError = store.MemoryError
 TABLES = ("agent_audit_plans", "agent_audit_claims", "agent_audit_inventories",
-          "agent_audit_deliveries", "agent_audit_reports", "agent_audit_resolutions")
+          "agent_audit_deliveries", "agent_audit_reports", "agent_audit_resolutions",
+          "agent_audit_abandonments")
+PROTOCOL_VERSION = 2
 FINDING_TYPES = {"missing_object", "boundary_truncated", "parameter_pollution",
                  "association_error", "scope_uncertain"}
 NOTICE = "独立模型核验和主代理处置记录，不是人工正确标签，也不证明没有遗漏。"
@@ -132,18 +134,20 @@ def _receipts(path):
     return [store._parse(line) for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
 
 
-def _fully_read_tags(index_path, receipts_path, context, offset=0):
+def _reading_progress(index_path, receipts_path, context, offset=0):
     """只承认当前角色/会话的完整字符交付，搜索不计入。"""
     index, _ = document_io.load_index(Path(index_path))
     digest = store._file_hash(Path(index_path))
     spans = {unit["unit_id"]: [] for unit in index["units"]}
     units = {unit["unit_id"]: unit for unit in index["units"]}
+    receipt_count = 0
     for receipt in _receipts(receipts_path)[offset:]:
         actual = receipt.get("execution_context", {})
         if actual.get("agent") != context["agent"] or actual.get("session_id") != context["session_id"]:
             continue
         if receipt.get("index_sha256") != digest or receipt.get("coverage_kind") != "full_original":
             raise MemoryError("核验读取回执与当前原文版本不一致。")
+        receipt_count += 1
         for part in receipt.get("parts", []):
             key = part.get("unit_id")
             if key not in units:
@@ -153,8 +157,8 @@ def _fully_read_tags(index_path, receipts_path, context, offset=0):
                     or part.get("total_length") != length):
                 raise MemoryError("核验原文读取范围不合法。")
             spans[key].append((start, end))
-    complete = set()
-    for key, segments in spans.items():
+    complete, next_cursor = set(), None
+    for position, (key, segments) in enumerate(spans.items()):
         end = 0
         for start, stop in sorted(segments):
             if start > end:
@@ -162,8 +166,17 @@ def _fully_read_tags(index_path, receipts_path, context, offset=0):
             end = max(end, stop)
         if segments and end == units[key]["source_length"]:
             complete.add(key)
+        elif next_cursor is None:
+            next_cursor = "0" if position == 0 and end == 0 else f"{position}:{end}"
     tags = {tag for tag, key in index["tag_to_unit"].items() if key in complete}
-    return tags, len(complete) == len(units)
+    return tags, {"receipt_count": receipt_count, "covered_units": len(complete),
+                  "total_units": len(units), "complete": len(complete) == len(units),
+                  "next_cursor": next_cursor}
+
+
+def _fully_read_tags(index_path, receipts_path, context, offset=0):
+    tags, progress = _reading_progress(index_path, receipts_path, context, offset)
+    return tags, progress["complete"]
 
 
 def _worker_complete(plan, context):
@@ -200,6 +213,151 @@ def _delivered(connection, audit_id, kind):
     return selected, empty
 
 
+def _active(connection, plan):
+    if _one(connection, "agent_audit_abandonments", plan["audit_id"]):
+        raise MemoryError("核验票已废弃，不能继续操作或用于提交；请使用新票和新子会话。")
+
+
+def _progress(connection, plan):
+    audit_id = plan["audit_id"]
+    claim = _one(connection, "agent_audit_claims", audit_id)
+    context = claim["execution_context"] if claim else {"agent": "term-auditor", "session_id": ""}
+    _, reading = _reading_progress(plan["worker_index_path"], plan["receipts_path"], context)
+    draft = _read(plan["frozen_result_path"])
+    positions, empty = _delivered(connection, audit_id, "draft")
+    missing = sorted(set(range(len(draft))) - positions)
+    draft_complete = not missing and (bool(draft) or empty)
+    draft_progress = {"delivered_count": len(set(range(len(draft))) & positions), "total": len(draft),
+                      "complete": draft_complete,
+                      "next_cursor": None if draft_complete else str(missing[0]) if missing else "0"}
+    inventory = _one(connection, "agent_audit_inventories", audit_id)
+    report = _one(connection, "agent_audit_reports", audit_id)
+    resolutions = [item for item in evo._rows(connection, "agent_audit_resolutions") if item["audit_id"] == audit_id]
+    phase = (resolutions[-1]["status"] if resolutions else "reported" if report else
+             "draft_reading" if positions or empty else "inventory_frozen" if inventory else
+             "reading" if claim else "prepared")
+    if _one(connection, "agent_audit_abandonments", audit_id):
+        phase = "abandoned"
+    return {"phase": phase, "worker_session_id": context["session_id"] or None,
+            "continue_task_id": context["session_id"] if claim and not report and phase != "abandoned" else None,
+            "read_progress": reading, "draft_progress": draft_progress,
+            "inventory_count": len(inventory["objects"]) if inventory else None,
+            "inventory_object_ids": [item.get("object_id") for item in inventory["objects"]] if inventory else [],
+            "report_available": report is not None}
+
+
+def status(root, request):
+    """控制者只读进度；即使冻结材料漂移，也允许诊断和显式废弃。"""
+    with _db(root) as connection:
+        plan = _plan(connection, request.get("audit_id"))
+        _owner(plan, request.get("execution_context"))
+        integrity_error = None
+        try:
+            _frozen(root, plan)
+            progress = _progress(connection, plan)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            integrity_error = str(exc)
+            claim = _one(connection, "agent_audit_claims", plan["audit_id"])
+            progress = {"phase": "abandoned" if _one(connection, "agent_audit_abandonments", plan["audit_id"]) else "invalid",
+                        "worker_session_id": claim["execution_context"]["session_id"] if claim else None,
+                        "continue_task_id": None, "read_progress": None, "draft_progress": None,
+                        "report_available": _one(connection, "agent_audit_reports", plan["audit_id"]) is not None}
+        if progress["phase"] == "abandoned":
+            next_action = "旧票已废弃；验证当前草稿后 prepare 新票，用新子会话重新独立阅读全文，不继承旧覆盖。"
+        elif integrity_error:
+            next_action = "冻结材料已变化；保留现有工件并说明原因，不能继续旧票；未关闭的票可 abandon 后重新准备。"
+        elif progress["phase"] == "cleared":
+            next_action = "核验处置已关闭；使用绑定的最终结果和证据继续 commit，文件变化则准备新票，不重复核验或废弃旧关闭记录。"
+        elif progress["report_available"]:
+            next_action = "子任务已完成；inspect 读完报告再回读取证和 resolve，不要再派发核验者。"
+        elif progress["continue_task_id"]:
+            next_action = "确认原任务已中断后，用原生 task 的 task_id=continue_task_id 恢复原子会话，prompt 仍只含 audit_id；进度不证明任务是否仍在运行。若无法恢复，不得让新子会话接旧票；先 abandon 再 prepare。"
+        else:
+            next_action = "用全新 term-auditor 原生 task 认领本票，prompt 严格只含 audit_id。"
+        return {"audit_id": plan["audit_id"], "protocol_version": plan.get("protocol_version", 1),
+                **progress, "integrity_error": integrity_error, "next_action": next_action, "notice": NOTICE}
+
+
+def abandon(root, request):
+    with _db(root, write=True) as connection:
+        plan = _plan(connection, request.get("audit_id"))
+        context = _owner(plan, request.get("execution_context"))
+        reason = store._string(request.get("reason"), "reason", 1200)
+        previous = _one(connection, "agent_audit_abandonments", plan["audit_id"])
+        if previous:
+            if previous["reason"] != reason:
+                raise MemoryError("已废弃的核验票不能改写废弃原因。")
+        else:
+            if any(item["audit_id"] == plan["audit_id"] and item["status"] == "cleared"
+                   for item in evo._rows(connection, "agent_audit_resolutions")):
+                raise MemoryError("已关闭的核验票不能废弃；草稿变更需要另行准备新票。")
+            claim = _one(connection, "agent_audit_claims", plan["audit_id"])
+            body = {"audit_id": plan["audit_id"], "reason": reason, "execution_context": context,
+                    "worker_session_id": claim["execution_context"]["session_id"] if claim else None}
+            body["abandonment_path"] = _write(Path(plan["directory"]) / "abandonment.json", body)
+            previous = _put(connection, "agent_audit_abandonments", plan["audit_id"], body)
+        return {"audit_id": plan["audit_id"], "status": "abandoned", "abandonment_path": previous["abandonment_path"],
+                "next_action": "验证当前草稿后 prepare 新票、新子会话重新独立阅读全文；旧票和回执保留，不再用于提交。", "notice": NOTICE}
+
+
+def _inventory_objects(plan, objects):
+    if not isinstance(objects, list) or len(objects) > 1000:
+        raise MemoryError("objects 必须是独立设备清点数组，最多 1000 项。")
+    index = _index(plan)
+    normalized = []
+    for number, item in enumerate(objects, 1):
+        if not isinstance(item, dict):
+            raise MemoryError("设备清点条目必须是对象。")
+        entry = {"title": store._string(item.get("title"), "title", 300),
+                 "evidence_tags": _tags(index, item.get("evidence_tags"), "evidence_tags")}
+        if plan.get("protocol_version", 1) >= 2:
+            if item.get("object_kind") not in {"equipment", "integrated_system"}:
+                raise MemoryError("object_kind 必须为 equipment 或 integrated_system；章节总名不能代替设备清点。")
+            entry.update(object_id=f"o{number:04d}", object_kind=item["object_kind"])
+            if item["object_kind"] == "integrated_system":
+                entry["system_basis"] = store._string(item.get("system_basis"), "system_basis", 600)
+        normalized.append(entry)
+    return normalized
+
+
+def _coverage(inventory, findings, draft, value):
+    objects = {item["object_id"]: item for item in inventory["objects"]}
+    if (not isinstance(value, list) or len(value) != len(objects)
+            or any(not isinstance(item, dict) or not isinstance(item.get("object_id"), str) for item in value)
+            or {item["object_id"] for item in value} != set(objects)):
+        raise MemoryError("coverage 必须逐一覆盖全部独立清点对象，每个 object_id 恰好一次，不能漏项或重复。")
+    clauses, mapping = {item["id"]: item for item in draft}, {item["finding_id"]: item for item in findings}
+    normalized = []
+    for item in value:
+        state, ids, refs = item.get("status"), item.get("clause_ids"), item.get("finding_ids")
+        if (state not in {"covered", "missing", "uncertain"} or not isinstance(ids, list)
+                or any(type(cid) is not int or cid not in clauses for cid in ids) or len(set(ids)) != len(ids)):
+            raise MemoryError("coverage.status 无效或 clause_ids 未引用冻结草稿的有效条款。")
+        if (not isinstance(refs, list) or any(not isinstance(ref, str) or ref not in mapping for ref in refs)
+                or len(set(refs)) != len(refs)):
+            raise MemoryError("coverage.finding_ids 必须引用本次 findings 按顺序生成的 f0001 等编号，不能重复。")
+        if state == "covered" and not any(clauses[cid]["条款分类"] != "general" for cid in ids):
+            raise MemoryError("covered 必须对应至少一条设备或系统草稿，不能只关联 general 通用要求。")
+        linked = [mapping[ref] for ref in refs]
+        if state == "missing" and (ids or not any(f["type"] == "missing_object" for f in linked)):
+            raise MemoryError("missing 对象不能声明已覆盖条款，且必须关联 missing_object 发现。")
+        if state in {"missing", "uncertain"}:
+            tags = set(objects[item["object_id"]]["evidence_tags"])
+            relevant = [f for f in linked if state != "missing" or f["type"] == "missing_object"]
+            if not any(tags & set(f["evidence_tags"]) for f in relevant):
+                raise MemoryError("missing/uncertain 必须关联具有该对象原文证据的真实发现，不能以无关发现补齐覆盖。")
+        normalized.append({"object_id": item["object_id"], "status": state, "clause_ids": ids, "finding_ids": refs,
+                           "reason": store._string(item.get("reason"), "coverage.reason", 600)})
+    return sorted(normalized, key=lambda item: item["object_id"])
+
+
+def _coverage_summary(report):
+    if "object_coverage" not in report:
+        return None
+    return {state: sum(item["status"] == state for item in report["object_coverage"])
+            for state in ("covered", "missing", "uncertain")}
+
+
 def prepare(root, request):
     context = _context(request.get("execution_context"), "term-extractor")
     index_path, result_path, evidence_path = [Path(request[key]).resolve() for key in ("index_path", "result_path", "evidence_path")]
@@ -226,7 +384,7 @@ def prepare(root, request):
     receipts = directory / "source/read_receipts.jsonl"
     receipts.write_text("", encoding="utf-8")
     references = _refs(root)
-    plan = {"audit_id": audit_id, "controller": context, "index_path": str(index_path),
+    plan = {"audit_id": audit_id, "protocol_version": PROTOCOL_VERSION, "controller": context, "index_path": str(index_path),
             "index_sha256": index_sha, "source_path": index["source_path"],
             "source_sha256": index["source_sha256"], "snapshot_path": str(snapshot),
             "snapshot_sha256": store._file_hash(snapshot), "worker_index_path": str(worker_index),
@@ -241,7 +399,8 @@ def prepare(root, request):
     plan["original_evidence_sha256"] = original_evidence_sha
     with _db(root, write=True) as connection:
         _put(connection, "agent_audit_plans", audit_id, plan)
-    return {"audit_id": audit_id, "status": "prepared", "result_sha256": plan["original_result_sha256"],
+    return {"audit_id": audit_id, "status": "prepared", "protocol_version": plan["protocol_version"],
+            "result_sha256": plan["original_result_sha256"],
             "next_action": "用 task 新建 term-auditor 子会话，prompt 严格只传 audit_id=" + audit_id,
             "notice": NOTICE}
 
@@ -252,9 +411,12 @@ def dispatch(root, request):
     action = request.get("action")
     if action == "prepare":
         return prepare(root, request)
+    if action == "status":
+        return status(root, request)
+    if action == "abandon":
+        return abandon(root, request)
     with _db(root, write=True) as connection:
         plan = _plan(connection, request.get("audit_id"))
-        _frozen(root, plan)
         audit_id = plan["audit_id"]
         if action in {"inspect", "resolve"}:
             context = _owner(plan, request.get("execution_context"))
@@ -268,17 +430,31 @@ def dispatch(root, request):
                 raise MemoryError("一个核验子会话只能处理一张票，新票需要新会话。")
             claim = _one(connection, "agent_audit_claims", audit_id)
             if claim and claim["execution_context"]["session_id"] != context["session_id"]:
-                raise MemoryError("本票已被其他核验会话领取。")
+                raise MemoryError("本票已被其他核验会话领取；主代理先用 term_audit_status 查询原 task_id 恢复，不能让新子会话接旧票。")
+            _active(connection, plan)
+            _frozen(root, plan)
             response = {"audit_id": audit_id, "reference_pack": plan["reference_pack"],
+                        "protocol_version": plan.get("protocol_version", 1),
                         "unit_count": len(_index(plan)["units"]), "notice": NOTICE,
-                        "next_action": "先独立全文 read，保存 inventory 后才能读取 draft；不接收主会话推理、标签或旧答案。"}
-            if len(store._canonical(response)) > 48 * 1024:
-                raise MemoryError("核验口径超过工具交付预算。")
+                        "next_action": "先独立全文 read，按设备固定 inventory 后才能读取 draft；恢复时沿首个覆盖缺口继续，冻结清单不能重写。新票 finish 必须逐对象提交 coverage。"}
             if not claim:
                 _put(connection, "agent_audit_claims", audit_id, {"audit_id": audit_id, "execution_context": context})
+            response.update(_progress(connection, plan))
+            if response["report_available"]:
+                response["next_action"] = "报告已完成并冻结，只向父任务返回完成状态；不要重复读取、清点或 finish。"
+            elif response["draft_progress"]["complete"]:
+                response["next_action"] = "清单已冻结且草稿已读完；按本票清单完成取证和 finish，不重写清单。"
+            elif response["inventory_count"] is not None:
+                response["next_action"] = "清单已冻结，不能修改；沿 draft_progress.next_cursor 继续读取冻结草稿，再完成核验。"
+            elif response["read_progress"]["complete"]:
+                response["next_action"] = "全文已独立交付；先按设备或有据的整体系统固定 inventory，再读取草稿。"
+            if len(store._canonical(response)) > 48 * 1024:
+                raise MemoryError("核验口径超过工具交付预算。")
             return response
         else:
             context = _worker(connection, plan, request.get("execution_context"))
+        _active(connection, plan)
+        _frozen(root, plan)
         report = _one(connection, "agent_audit_reports", audit_id)
         inventory = _one(connection, "agent_audit_inventories", audit_id)
         if action in {"read", "search"}:
@@ -304,14 +480,7 @@ def dispatch(root, request):
             return {"model_view": page["model_view"]}
         if action == "inventory":
             _worker_complete(plan, context)
-            objects = request.get("objects")
-            if not isinstance(objects, list) or len(objects) > 1000:
-                raise MemoryError("objects 必须是独立设备清点数组，最多 1000 项。")
-            normalized = [{"title": store._string(item.get("title"), "title", 300),
-                           "evidence_tags": _tags(_index(plan), item.get("evidence_tags"), "evidence_tags")}
-                          for item in objects if isinstance(item, dict)]
-            if len(normalized) != len(objects):
-                raise MemoryError("设备清点条目必须是对象。")
+            normalized = _inventory_objects(plan, request.get("objects"))
             if inventory and inventory["objects"] != normalized:
                 raise MemoryError("独立设备清点已冻结，看到草稿后不能反改清点。")
             if report:
@@ -319,7 +488,8 @@ def dispatch(root, request):
             if not inventory:
                 _put(connection, "agent_audit_inventories", audit_id,
                      {"audit_id": audit_id, "objects": normalized, "execution_context": context})
-            return {"audit_id": audit_id, "inventory_count": len(normalized), "status": "inventory_frozen"}
+            return {"audit_id": audit_id, "inventory_count": len(normalized), "status": "inventory_frozen",
+                    "object_ids": [item.get("object_id") for item in normalized]}
         if action == "draft":
             if not inventory:
                 raise MemoryError("先完整读原文并固定独立设备清点 inventory，再读取主代理草稿。")
@@ -362,27 +532,41 @@ def dispatch(root, request):
             summary = request.get("summary", "")
             if not isinstance(summary, str) or len(summary) > 2000 or (not normalized and not summary.strip()):
                 raise MemoryError("summary 必须是至多 2000 字的说明；无发现时须说明检查结果。")
+            coverage = (_coverage(inventory, normalized, draft, request.get("coverage"))
+                        if plan.get("protocol_version", 1) >= 2 else None)
             body = {"audit_id": audit_id, "findings": normalized, "summary": summary,
                     "execution_context": context, "primary_receipt_offset": len(_receipts(Path(plan["index_path"]).with_name("read_receipts.jsonl"))),
                     "draft_sha256": plan["original_result_sha256"], "notice": NOTICE}
+            if coverage is not None:
+                body.update(protocol_version=plan["protocol_version"], inventory=inventory["objects"], object_coverage=coverage)
             if report:
-                if report["findings"] != normalized or report["summary"] != summary:
+                if (report["findings"] != normalized or report["summary"] != summary
+                        or (coverage is not None and report.get("object_coverage") != coverage)):
                     raise MemoryError("已冻结的核验报告不能覆盖。")
             else:
                 body["report_path"] = _write(Path(plan["directory"]) / "report.json", body)
                 report = _put(connection, "agent_audit_reports", audit_id, body)
             return {"audit_id": audit_id, "status": "reported", "finding_count": len(normalized),
-                    "report_path": report["report_path"], "notice": NOTICE}
+                    "coverage_summary": _coverage_summary(report), "report_path": report["report_path"], "notice": NOTICE}
         if action == "inspect":
             if not report:
                 raise MemoryError("独立核验尚未完成，请等待子任务返回。")
-            response, positions = _page(report["findings"], request.get("cursor", "0"),
+            section = request.get("section", "findings")
+            if section not in {"findings", "coverage"}:
+                raise MemoryError("section 必须为 findings 或 coverage。")
+            if section == "coverage":
+                objects = {item["object_id"]: item for item in report.get("inventory", [])}
+                items = [{**objects[item["object_id"]], **item} for item in report.get("object_coverage", [])]
+            else:
+                items = report["findings"]
+            response, positions = _page(items, request.get("cursor", "0"),
                 request.get("limit", 10), request.get("max_bytes", 8192),
                 {"audit_id": audit_id, "summary": report["summary"], "finding_count": len(report["findings"]),
+                 "section": section, "coverage_summary": _coverage_summary(report),
                  "draft_sha256": report["draft_sha256"], "notice": NOTICE})
             _put(connection, "agent_audit_deliveries", uuid.uuid4().hex,
-                 {"audit_id": audit_id, "kind": "report", "positions": positions,
-                  "empty": not report["findings"], "execution_context": context})
+                 {"audit_id": audit_id, "kind": "report" if section == "findings" else "coverage", "positions": positions,
+                  "empty": not items, "execution_context": context})
             return response
         if action == "resolve":
             if not report:
@@ -455,6 +639,7 @@ def assert_ready(root, index_path, result_path, evidence_path, context):
         if not plans:
             raise MemoryError("本次主会话尚未完成独立核验；请 prepare → term-auditor → inspect → resolve 后提交。")
         plan = plans[-1]
+        _active(connection, plan)
         _frozen(root, plan)
         resolutions = [item for item in evo._rows(connection, "agent_audit_resolutions") if item["audit_id"] == plan["audit_id"]]
         if not resolutions or resolutions[-1]["status"] != "cleared":
@@ -465,6 +650,9 @@ def assert_ready(root, index_path, result_path, evidence_path, context):
             raise MemoryError("最终草稿或证据已变化，旧核验处置不再适用；请准备新核验票。")
         report = _one(connection, "agent_audit_reports", plan["audit_id"])
         return {"audit_id": plan["audit_id"], "status": "cleared", "notice": NOTICE,
+                "protocol_version": plan.get("protocol_version", 1),
+                "inventory_count": len(_one(connection, "agent_audit_inventories", plan["audit_id"])["objects"]),
+                "coverage_summary": _coverage_summary(report),
                 "finding_count": len(report["findings"]), "report_path": report["report_path"],
                 "resolution_path": resolution["resolution_path"],
                 "decision_counts": {kind: sum(item["decision"] == kind for item in resolution["decisions"])

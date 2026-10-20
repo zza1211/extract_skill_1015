@@ -114,9 +114,10 @@ class CommitLearningTests(unittest.TestCase):
             if not page["has_more"]:
                 break
             cursor = page["next_cursor"]
-        call("inventory", child, audit_id=audit_id, objects=[{"title": "Access Point", "evidence_tags": ["<C1>"]}])
+        call("inventory", child, audit_id=audit_id, objects=[{"title": "Access Point", "object_kind": "equipment", "evidence_tags": ["<C1>"]}])
         call("draft", child, audit_id=audit_id)
-        call("finish", child, audit_id=audit_id, findings=[], summary="提交一致性的合成协议测试，不宣称模型正确。")
+        call("finish", child, audit_id=audit_id, findings=[], coverage=[{"object_id": "o0001", "status": "covered", "clause_ids": [0],
+             "finding_ids": [], "reason": "合成夹具对应唯一条款，仅验证提交一致性。"}], summary="提交一致性的合成协议测试，不宣称模型正确。")
         call("inspect", parent, audit_id=audit_id)
         call("resolve", parent, audit_id=audit_id, result_path=str(self.result), evidence_path=str(self.evidence), decisions=[])
         receipt = json.loads(self.receipts.read_text(encoding="utf-8"))

@@ -54,7 +54,7 @@ function compact(response: any, maxBytes: number): string {
 }
 
 export const prepare = tool({
-  description: "由主 agent 固定当前原文索引、结果和证据，创建独立内容审计票。随后用新 term-auditor 原生 task，只传 audit_id=票号；不向审计者泄露主草稿。",
+  description: "由主 agent 固定当前原文索引、结果和证据，创建独立内容审计票。随后用新 term-auditor 原生 task，只传 audit_id=票号；按设备或完整系统清点并逐项核对，不向审计者泄露主草稿。",
   args: { index_path: tool.schema.string(), result_path: tool.schema.string(), evidence_path: tool.schema.string() },
   async execute(args, context) {
     const root = projectRoot(context.directory);
@@ -64,11 +64,28 @@ export const prepare = tool({
   },
 });
 
-export const inspect = tool({
-  description: "主 agent 在审计完成后分页查看独立发现；审计是业务核验建议，最终修订与取舍仍由主 agent 根据原文决定。",
-  args: { audit_id: tool.schema.string(), cursor: tool.schema.string().optional(), limit: tool.schema.number().int().min(1).max(20).optional(), max_bytes: tool.schema.number().int().min(2048).max(24576).optional() },
+export const status = tool({
+  description: "主 agent 只读独立核验阶段、continue_task_id及原文/草稿首个覆盖缺口。进度不证明任务仍在运行或已经中断，不能代替inspect。确认中断后用原task_id恢复同一子会话，不把旧票交给新会话。",
+  args: { audit_id: tool.schema.string() },
+  async execute(args, context) { return output(await invoke(context, "term-extractor", "status", args)); },
+});
+
+export const abandon = tool({
+  description: "主 agent 显式废弃尚未cleared的旧核验票并记录原因，适用于原子会话确实无法恢复或冻结材料漂移。之后旧票禁止操作或提交，新票新子会话不能继承覆盖。相同原因重试幂等；不取消仍在执行的原生任务。",
+  args: { audit_id: tool.schema.string(), reason: tool.schema.string().min(1) },
   async execute(args, context) {
-    return output(await invoke(context, "term-extractor", "inspect", { audit_id: args.audit_id, cursor: args.cursor ?? "0", limit: pageLimit(args.limit), max_bytes: budget(args.max_bytes) }));
+    if (typeof args.reason !== "string" || !args.reason.trim()) throw new Error("终止核验必须说明 reason。");
+    return output(await invoke(context, "term-extractor", "abandon", args));
+  },
+});
+
+export const inspect = tool({
+  description: "主 agent 在审计完成后分页查看独立发现，section 默认 findings；coverage 查看设备/完整系统清点与草稿对应关系。最终修订与取舍由主 agent 根据原文决定；提交前仍须读完 findings。",
+  args: { audit_id: tool.schema.string(), section: tool.schema.enum(["findings", "coverage"]).optional(), cursor: tool.schema.string().optional(), limit: tool.schema.number().int().min(1).max(20).optional(), max_bytes: tool.schema.number().int().min(2048).max(24576).optional() },
+  async execute(args, context) {
+    const section = args.section ?? "findings";
+    if (!["findings", "coverage"].includes(section)) throw new Error("section 只能为 findings 或 coverage。");
+    return output(await invoke(context, "term-extractor", "inspect", { audit_id: args.audit_id, section, cursor: args.cursor ?? "0", limit: pageLimit(args.limit), max_bytes: budget(args.max_bytes) }));
   },
 });
 
@@ -111,7 +128,7 @@ export const search = tool({
 });
 
 export const inventory = tool({
-  description: "全文独立读取后固定审计者识别的采购对象清单，再解封主草稿。objects_json=[{title,evidence_tags:[]}]，依据原文列目标设备，不复制主 agent 答案。",
+  description: "全文独立读取后按设备或完整系统固定采购对象清单，再解封主草稿。objects_json=[{title,object_kind:equipment|integrated_system,evidence_tags:[],system_basis?}]。完整系统须有<=600字的原文合并依据，不强拆组件。返回稳定 object_ids，finish时逐项说明与草稿的对应关系。",
   args: { audit_id: tool.schema.string(), objects_json: tool.schema.string() },
   async execute(args, context) {
     return output(await invoke(context, "term-auditor", "inventory", { audit_id: args.audit_id, objects: jsonArray(args.objects_json, "objects_json") }));
@@ -127,9 +144,10 @@ export const draft = tool({
 });
 
 export const finish = tool({
-  description: "独立核验后提交发现：findings_json=[{type:missing_object|boundary_truncated|parameter_pollution|association_error|scope_uncertain,clause_ids:[],evidence_tags:[],finding,suggested_action,certainty:confirmed|uncertain}]。程序生成 finding_id；没有问题可传空数组，不编造问题。",
-  args: { audit_id: tool.schema.string(), findings_json: tool.schema.string(), summary: tool.schema.string().optional() },
+  description: "独立核验后提交findings_json=[{type:missing_object|boundary_truncated|parameter_pollution|association_error|scope_uncertain,clause_ids:[],evidence_tags:[],finding,suggested_action,certainty:confirmed|uncertain}]。新票必填coverage_json=[{object_id,status:covered|missing|uncertain,clause_ids:[],finding_ids:[],reason}]，清点对象各一项。covered须有非general条款；missing/uncertain须关联有对象原文依据的发现。finding_id按发现顺序为f0001等；无发现可传[]，不编造。",
+  args: { audit_id: tool.schema.string(), findings_json: tool.schema.string(), coverage_json: tool.schema.string().optional(), summary: tool.schema.string().optional() },
   async execute(args, context) {
-    return output(await invoke(context, "term-auditor", "finish", { audit_id: args.audit_id, findings: jsonArray(args.findings_json, "findings_json"), summary: args.summary ?? "" }));
+    return output(await invoke(context, "term-auditor", "finish", { audit_id: args.audit_id, findings: jsonArray(args.findings_json, "findings_json"),
+      ...(args.coverage_json !== undefined ? { coverage: jsonArray(args.coverage_json, "coverage_json") } : {}), summary: args.summary ?? "" }));
   },
 });

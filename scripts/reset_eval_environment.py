@@ -47,6 +47,17 @@ def targets(root: Path, *, allow_external_memory: bool = False) -> tuple[list[Pa
     memory = _resolved(Path(configured))
     if memory in selected:
         return selected, notices
+    if memory == root or memory in root.parents:
+        raise RuntimeError(
+            "拒绝把项目根目录或其父目录作为记忆清理目标："
+            f"{memory}；请检查 TERM_EXTRACT_MEMORY_DIR。"
+        )
+    protected = (root / ".git").resolve(), (root / ".opencode").resolve()
+    if any(memory == path or path in memory.parents for path in protected):
+        raise RuntimeError(
+            "拒绝把代码仓库或 OpenCode 配置目录作为记忆清理目标："
+            f"{memory}"
+        )
     try:
         memory.relative_to(root)
     except ValueError:

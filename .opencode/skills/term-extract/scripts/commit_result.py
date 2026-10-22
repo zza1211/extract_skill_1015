@@ -144,7 +144,7 @@ def main() -> int:
             "status": "demo_submitted" if demo else "submitted",
             "production_submittable": not demo,
             "model_id": args.model_id,
-            "skill_version": "0.7.0",
+            "skill_version": "0.8.0",
             "skill_sha256": hashlib.sha256(skill_path.read_bytes()).hexdigest(),
             "reference_sha256": reference_hashes,
             "source_path": index.get("source_path"),

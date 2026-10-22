@@ -26,7 +26,7 @@ export const checkpoint = tool({
       status: "candidate_checkpoint",
       index_sha256: await digest(indexPath),
       source_path: index.source_path,
-      skill_version: "0.7.0",
+      skill_version: "0.8.0",
       candidates,
       notes: args.notes ?? "",
     }, null, 2) + "\n", "utf8");

@@ -1,8 +1,8 @@
 # 条款抽取 Skill POC
 
-**0.7.0：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、核验、总结经验并组织独立验证。Python 只提供定位、校验、比较、存储和准入等原子工具；网页管理记忆与标书结果校验，不发起模型调用。暂不引入向量模型。
+**0.8.0：OpenCode `term-extractor` 是唯一执行入口。** 它加载中文 Skill，自主读取原文、抽取、建立结构化疑点账本、核验、总结经验并组织独立验证。Python 只提供定位、校验、疑点信号、比较、存储和准入等原子工具；网页管理记忆与标书结果校验，不发起模型调用。暂不引入向量模型。
 
-先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；按标书检查条款、修改边界、同步文件和反馈学习见[结果校验说明](docs/result-review.md)。评测集准备、原生验证流程及前端清单框见[评测指南](docs/evaluation-guide.md)，网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
+先看[抽取与经验演进方案](docs/learning-evolution.md)，了解如何从第一篇产生经验并影响下一篇；疑点信号、账本和处置见[疑点引擎说明](docs/doubt-engine.md)；按标书检查条款、修改边界、同步文件和反馈学习见[结果校验说明](docs/result-review.md)。评测集准备、原生验证流程及前端清单框见[评测指南](docs/evaluation-guide.md)，网页操作见[记忆工作台](docs/memory-dashboard.md)，数据与版本见[记忆架构](docs/memory-architecture.md)。
 
 ## 启动
 
@@ -101,7 +101,7 @@ python -X utf8 .opencode/skills/term-extract/scripts/memory_ui.py
 
 最终为七字段 JSON 数组：`id`、`条款标题`、`条款分类`、`相关条款`、`产品分类`、`定位标识`、`产品数量`。产品分类仅参考；质量重点是目标设备齐全、选型参数完整、不混入其他设备参数、数量和关系正确。机柜与布线不抽取，纯品牌准入不单独抽为 general；连续表格两行不因此成为 separate。完整口径见 [business-rules.md](.opencode/skills/term-extract/references/business-rules.md)。
 
-`prepare / read / checkpoint / search / validate / commit` 是正常自主抽取工具链。正式提交附简体中文复盘：最多三条有证据的可迁移观察，或没有新经验的原因。演示 `demo_tags` 仅工作副本可用，不能用于生产提交或可信学习。仓库不提供真实标书、标签、私有库或运行报告。
+`prepare / read / checkpoint / search / validate / commit` 是正常自主抽取工具链。疑点引擎通过 `term_doubt_scan` 从 index、草稿和 evidence 生成确定性风险信号，主 agent 用 `term_doubt_record` 保存疑点账本，再用 `term_doubt_resolve` 记录原文核验结果。信号不是语义错误结论，C0-C3 也不是未经校准的概率；第一版不新增子 agent。正式提交附简体中文复盘：最多三条有证据的可迁移观察，或没有新经验的原因。演示 `demo_tags` 仅工作副本可用，不能用于生产提交或可信学习。仓库不提供真实标书、标签、私有库或运行报告。
 
 ## 经验如何学习、验证和消费
 

@@ -255,6 +255,7 @@ class DashboardService:
                 "can_publish": usable is not None and not blockers, "publish_evaluation_id": usable["evaluation_id"] if usable else None,
                 "can_manual_publish": manual["can_publish"], "manual_publish_blockers": manual["blockers"],
                 "manual_publish_warnings": manual.get("warnings", []),
+                "can_discard": memory["state"] in {"candidate", "needs_review"},
                 "publication": store.publication_info(connection, memory_id, selected),
                 "active_publication": store.publication_info(connection, memory_id, active_revision) if active_revision else None,
                 "can_withdraw": active_revision is not None}

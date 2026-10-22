@@ -303,6 +303,29 @@ def record_decision(root, memory_id, revision, status, reason, actor="system", t
     return record
 
 
+def discard_candidate(root, memory_id, revision, reason, actor="维护者"):
+    """丢弃未生效候选；保留不可变决策记录，不物理删除经验修订。"""
+    memory_id = store._string(memory_id, "memory_id", 128)
+    revision = store._integer(revision, "revision")
+    actor = store._string(actor, "actor", 160)
+    reason = store._string(reason, "reason", 4000)
+    with _db(root, write=True) as connection:
+        candidate = store._candidate(connection, memory_id, revision)
+        if candidate["state"] == "published":
+            raise MemoryError("已发布经验不能丢弃候选，请使用撤回操作。")
+        if candidate["state"] in {"merged", "withdrawn", "superseded"}:
+            raise MemoryError(f"当前修订状态为 {candidate['state']}，不能丢弃。")
+        prior = _decision(connection, memory_id, revision)
+        if candidate["state"] == "rejected" and prior and prior.get("status") == "rejected":
+            return {**prior, "discarded": True, "replayed": True}
+        record = {"decision_id": "decision_" + uuid.uuid4().hex, "memory_id": memory_id,
+                  "revision": revision, "status": "rejected", "reason": reason,
+                  "actor": actor, "target_memory_id": None, "target_revision": None,
+                  "created_at": store._now()}
+        _put(connection, "evoz_decisions", record["decision_id"], record)
+    return {**record, "discarded": True, "replayed": False}
+
+
 def _rule_key(payload):
     return store._hash({key: re.sub(r"\s+", " ", payload[key]).strip() for key in ("issue_type", "applies_when", "rule", "exclusions")})
 

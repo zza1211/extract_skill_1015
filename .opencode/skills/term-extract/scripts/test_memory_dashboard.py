@@ -120,6 +120,36 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.service.get(path, {})["memory"]["state"], "withdrawn")
         self.assertEqual(store.list_memories(self.root)["memories"][0]["active_revision"], None)
 
+    def test_candidate_can_be_discarded_without_physical_delete(self):
+        candidate = self.service.post("/api/memories", {"payload": self.payload()})
+        path = "/api/memories/" + candidate["memory_id"]
+        detail = self.service.get(path, {})
+        self.assertTrue(detail["can_discard"])
+        body = {"memory_id": candidate["memory_id"], "revision": 1,
+                "actor": "合成操作人", "reason": "误把非设备服务总结为设备规则。", "acknowledged": True}
+        for value in (False, 1, "true", None):
+            with self.assertRaises(store.MemoryError):
+                self.service.post("/api/experiences/discard", {**body, "acknowledged": value})
+        discarded = self.service.post("/api/experiences/discard", body)
+        self.assertTrue(discarded["discarded"])
+        self.assertFalse(discarded["replayed"])
+        self.assertEqual(store.load_candidate(self.root, candidate["memory_id"], 1)["state"], "rejected")
+        self.assertFalse(self.service.get(path, {})["can_discard"])
+        self.assertEqual(self.service.get("/api/memories", {"state": "candidate"})["total"], 0)
+        with store._db(self.root) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM revisions WHERE memory_id=?", (candidate["memory_id"],)).fetchone()[0], 1)
+            decision = connection.execute("SELECT record_json FROM evoz_decisions").fetchone()[0]
+        self.assertEqual(json.loads(decision)["reason"], body["reason"])
+        replayed = self.service.post("/api/experiences/discard", body)
+        self.assertTrue(replayed["replayed"])
+
+    def test_published_candidate_cannot_be_discarded(self):
+        candidate = self.service.post("/api/memories", {"payload": self.payload()})
+        self.publish(candidate, self.evaluate_fixture(candidate))
+        with self.assertRaisesRegex(store.MemoryError, "已发布经验"):
+            self.service.post("/api/experiences/discard", {"memory_id": candidate["memory_id"], "revision": 1,
+                              "actor": "合成操作人", "reason": "错误", "acknowledged": True})
+
     def test_manual_publish_rechecks_reviewed_content_and_source_integrity(self):
         candidate = self.service.post("/api/memories", {"payload": self.payload()})
         body = {"memory_id": candidate["memory_id"], "revision": 1, "reviewer": "合成审核人",

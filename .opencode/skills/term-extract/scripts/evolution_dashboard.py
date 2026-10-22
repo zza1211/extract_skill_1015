@@ -61,4 +61,13 @@ def post(root: Path, parts: list[str], body: dict):
     if parts == ["api", "experiences", "scan"]:
         import evolution_store as evolution
         return evolution.scan_conflicts(root, force=True)
+    if parts == ["api", "experiences", "discard"]:
+        import evolution_store as evolution
+        allowed = {"memory_id", "revision", "reason", "actor", "acknowledged"}
+        if set(body) - allowed:
+            raise store.MemoryError("丢弃候选请求包含未知字段。")
+        if body.get("acknowledged") is not True:
+            raise store.MemoryError("请明确勾选丢弃确认；acknowledged 必须为 true。")
+        return evolution.discard_candidate(root, body.get("memory_id"), body.get("revision"),
+                                           body.get("reason"), body.get("actor", "维护者"))
     return None

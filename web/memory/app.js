@@ -597,6 +597,14 @@ function memoryView(d) {
         "button secondary small",
         state.readOnly,
       ),
+      ...(d.can_discard
+        ? [button(
+            "丢弃候选经验",
+            () => discardCandidateAction(d),
+            "button danger small",
+            state.readOnly,
+          )]
+        : []),
       button("查看来源", () => {
         state.tab = "sources";
         $("detail-panel").replaceChildren(memoryView(d));
@@ -785,6 +793,40 @@ function memoryView(d) {
   }
   root.append(content);
   return root;
+}
+function discardCandidateAction(d) {
+  const p = d.memory.payload;
+  const form = el(
+    "form",
+    null,
+    null,
+    note(
+      "丢弃这条候选经验",
+      `将 v${d.memory.revision} 标记为已拒绝。经验正文和操作记录会保留，但它不会进入后续召回或发布候选列表。已发布版本请使用“撤回”。`,
+      "error",
+    ),
+    metadata({经验编号: d.memory.memory_id, 修订: `v${d.memory.revision}`, 标题: p.title}),
+  );
+  const actor = inputField(form, "actor", "操作人", "", "text", true);
+  const reason = inputField(form, "reason", "丢弃原因", "", "textarea", true);
+  reason.placeholder = "例如：把布线服务误总结成设备抽取规则。";
+  const ack = acknowledgement(
+    form,
+    "我确认这条候选经验不应保留为可用经验，并已填写丢弃原因。",
+  );
+  submitForm(form, "确认丢弃候选经验", async () => {
+    await api("/api/experiences/discard", {
+      memory_id: d.memory.memory_id,
+      revision: d.memory.revision,
+      actor: actor.value,
+      reason: reason.value,
+      acknowledged: ack.checked,
+    });
+    $("action-dialog").close();
+    toast("候选经验已丢弃；历史记录仍保留。", false);
+    await refresh();
+  });
+  dialog("丢弃候选经验", form);
 }
 function evaluationView(d) {
   const root = el("div");
